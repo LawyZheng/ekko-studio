@@ -543,6 +543,14 @@ export default {
     voiceInput: {
       backendSttRequired: 'Masaüstü uygulamasında sesli giriş için sunucu taraflı STT gerekir. Modeller → STT bölümünde yerel konuşma tanımayı etkinleştirin veya bir bulut sağlayıcısını yapılandırıp etkinleştirin.',
     },
+    sessionNotice: {
+      cronTitle: 'Zamanlanmış görev “{name}” tamamlandı',
+      cronFailedTitle: 'Zamanlanmış görev “{name}” başarısız oldu',
+      outputUnavailable: 'Bu çalışma ortamı için sonuç yok (yalnızca betik); yalnızca durum.',
+      receiptUnavailable: 'Bu çalıştırmanın kesin sonuç kaydı bulunamadı; yalnızca durum.',
+      unknown: 'Sonuç bilinmiyor. Studio bu görevi yeniden çalıştırmayacak.',
+      truncated: 'Sonuç görüntüleme için kısaltıldı.',
+    },
     selectMessages: "Mesajları seç",
     messagesSelected: "{count} seçildi",
     deleteSelectedMessages: "Seçilenleri sil",
