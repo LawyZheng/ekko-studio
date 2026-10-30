@@ -1117,6 +1117,7 @@ export default {
       receiptUnavailable: 'El comprobante exacto de esta ejecución no estaba disponible; solo estado.',
       unknown: 'Resultado desconocido. Studio no volverá a ejecutar esta tarea.',
       truncated: 'Resultado truncado para mostrar.',
+      externalSource: 'Notificación externa de «{source}» (remitente no verificado)',
     },
     selectMessages: "Seleccionar mensajes",
     messagesSelected: "{count} seleccionados",

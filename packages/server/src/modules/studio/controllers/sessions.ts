@@ -47,7 +47,7 @@ import {
   updateSessionStats as localUpdateSessionStats,
 } from '../public/sessions'
 import { buildDbExportHistory, ExportCompressor } from '../services/context-compressor/export-compressor'
-import { getUsage, getUsageBatch } from '../public/sessions'
+import { getSessionGeneration, getUsage, getUsageBatch } from '../public/sessions'
 import {
   SESSION_CATEGORY_NAME_MAX_LENGTH,
   createSessionCategory,
@@ -801,7 +801,8 @@ export async function get(ctx: any) {
   if (ctx.state?.sessionShare) {
     delete session.parent_title; delete session.parent_last_message; delete session.parent_last_message_role
   }
-  ctx.body = { session: personDisplaySession(session) }
+  // Callers freeze this to fence delayed writes (external notifications) to this incarnation.
+  ctx.body = { session: { ...personDisplaySession(session), session_generation: getSessionGeneration(session.id) } }
 }
 
 export async function listWorkspaceRunChanges(ctx: any) {
