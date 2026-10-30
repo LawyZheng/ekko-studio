@@ -1117,6 +1117,7 @@ export default {
       receiptUnavailable: 'Le reçu exact de cette exécution était indisponible ; statut uniquement.',
       unknown: 'Résultat inconnu. Studio ne relancera pas cette tâche.',
       truncated: 'Résultat tronqué pour l’affichage.',
+      externalSource: 'Notification externe de « {source} » (expéditeur non vérifié)',
     },
     selectMessages: "Sélectionner des messages",
     messagesSelected: "{count} sélectionnés",
