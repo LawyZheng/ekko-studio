@@ -280,9 +280,10 @@ describe('review fixes', () => {
     const { wrapper } = enroll('noop.py', 'print(1)\n')
     const result = probe(wrapper, [
       'worst = 0.0',
-      'for unit in ["x", "a.", "a:", "a=", "k=k", "\\"a\\":", "token ", "eyJa.", "a@", "://a"]:',
+      'for unit in ["x", "a.", "a:", "a=", "k=k", "\\"a\\":", "token ", "eyJa.", "a@", "://a", "\\n", "a \\n", " "]:',
       '    text = (unit * (32768 // len(unit) + 1))[:32768]',
       '    start = time.perf_counter(); w.sanitize(text); worst = max(worst, time.perf_counter() - start)',
+      'start = time.perf_counter(); w.sanitize("begin\\n" + "\\n" * 32768 + "end"); worst = max(worst, time.perf_counter() - start)',
       'print(worst)',
     ].join('\n'), undefined, 20_000)
     // A quadratic sanitizer does not finish within the probe's 20 s bound at all.
@@ -298,6 +299,26 @@ describe('review fixes', () => {
     const { final } = only()
     expect(final.content).toContain('visible')
     expect(spoolBytes()).not.toMatch(/suffix-secret|tail-secret/)
+  })
+
+  it('redacts secret assignments nested in the value of another key', () => {
+    const body = [
+      'import json',
+      'print(json.dumps({"result": {"password": "prefix\\"suffix-secret tail-secret"}}))',
+      'print(json.dumps([{"name": "a", "api_key": "nested-key-value"}]))',
+      'print("visible")',
+    ].join('\n')
+    const { wrapper } = enroll('nested.py', `${body}\n`)
+    run(wrapper)
+    expect(only().final).toMatchObject({ redaction_status: 'redacted' })
+    expect(spoolBytes()).not.toMatch(/suffix-secret|tail-secret|nested-key-value/)
+  })
+
+  it('shows NUL bytes visibly instead of publishing a report Studio must refuse', () => {
+    const { wrapper } = enroll('nul.py', 'import sys\nsys.stdout.write("file-a\\0file-b\\0")\n')
+    expect(run(wrapper).stdout).toBe('file-a\0file-b\0')
+    const { final } = only()
+    expect(final).toMatchObject({ outcome: 'output', content: 'file-a\u2400file-b\u2400' })
   })
 
   it('F7: reserves quota under an exclusive lock, so a racing launch is refused', () => {

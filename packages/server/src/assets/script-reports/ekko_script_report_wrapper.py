@@ -152,13 +152,34 @@ def is_silence(output: str) -> bool:
 
 # --- sanitizer (before any durable write; conservative) -----------------------------------------
 
-# Assignment-shaped secrets. Linear: a key is a bounded run that starts at a key boundary, its name
-# is tested separately, and quoted values honour backslash escapes.
+# Assignment-shaped secrets. Linear: a key is a bounded run that starts at a key boundary; only a
+# secret-named key consumes its value (quoted values honour backslash escapes), so assignments nested
+# in the value of another key are still visited.
 _SECRET_NAME = re.compile(r"(?i)secret|token|passw(?:or)?d|passwd|pwd|api[_\-]?key|access[_\-]?key|private[_\-]?key|credential|session[_\-]?id|cookie|auth")
-_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9_.\-])([\"']?)([A-Za-z0-9_.\-]{1,128})\1(\s*[:=]\s*)(\"(?:[^\"\\\n]|\\.)*\"?|'(?:[^'\\\n]|\\.)*'?|[^\s,;&]+)")
+_KEY = re.compile(r"(?<![A-Za-z0-9_.\-])([\"']?)([A-Za-z0-9_.\-]{1,128})\1[ \t]{0,16}[:=][ \t]{0,16}")
+_VALUE = re.compile(r"\"(?:[^\"\\\n]|\\.)*\"?|'(?:[^'\\\n]|\\.)*'?|[^\s,;&]+")
+
+
+def _redact_assignments(text: str) -> str:
+    out, copied, pos = [], 0, 0
+    while True:
+        key = _KEY.search(text, pos)
+        if key is None:
+            break
+        pos = key.end()
+        if not _SECRET_NAME.search(key[2]):
+            continue
+        value = _VALUE.match(text, pos)
+        if value is None:
+            continue
+        out.append(text[copied:pos])
+        out.append("[REDACTED]")
+        copied = pos = value.end()
+    out.append(text[copied:])
+    return "".join(out)
 _RULES = [
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"), "[REDACTED PRIVATE KEY]"),
-    (re.compile(r"(?im)^(\s*(?:proxy-)?authorization\s*[:=]\s*).+$"), r"\1[REDACTED]"),
+    (re.compile(r"(?im)^([ \t]*(?:proxy-)?authorization[ \t]*[:=][ \t]*).+$"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=\-]{8,}"), r"\1 [REDACTED]"),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]{0,31}://)[^/\s:@]{1,256}:[^/\s@]{1,256}@"), r"\1[REDACTED]@"),
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[REDACTED JWT]"),
@@ -178,7 +199,7 @@ def sanitize(text: str) -> tuple[str, bool]:
     result = text
     for pattern, replacement in _RULES:
         result = pattern.sub(replacement, result)
-    result = _ASSIGNMENT.sub(lambda m: f"{m[1]}{m[2]}{m[1]}{m[3]}[REDACTED]" if _SECRET_NAME.search(m[2]) else m[0], result)
+    result = _redact_assignments(result)
     return result, result != text
 
 
@@ -364,7 +385,8 @@ def build_final(manifest: dict, invocation_id: str, started_at: float, monotonic
     omitted = result.get("reason") if result.get("detail") is None else None
     if result.get("detail") is not None:
         try:
-            sanitized, changed = sanitize(result["detail"])
+            # Studio refuses NUL in a report body (find -print0, git -z): show it as a visible symbol.
+            sanitized, changed = sanitize(result["detail"].replace("\x00", "\u2400"))
             content, truncated = clip_utf8(sanitized, BODY_LIMIT_BYTES)
             redaction = "redacted" if changed else "clean"
         except Exception:
