@@ -97,9 +97,11 @@ export function resolveTargetScript(scriptsDir: string, script: string): { path:
     throw new EnrollmentError(400, 'invalid_script')
   }
   if (value.split(/[\\/]/).some(part => part === '..' || part === '')) throw new EnrollmentError(400, 'invalid_script')
-  const extension = extname(value).toLowerCase()
-  const kind = extension === '.sh' || extension === '.bash' ? 'bash' : extension === '.py' ? 'python' : null
-  if (!kind) throw new EnrollmentError(400, 'unsupported_script_type')
+  const kindOf = (file: string) => {
+    const extension = extname(file).toLowerCase()
+    return extension === '.sh' || extension === '.bash' ? 'bash' : extension === '.py' ? 'python' : null
+  }
+  if (!kindOf(value)) throw new EnrollmentError(400, 'unsupported_script_type')
   let root: string
   let path: string
   try {
@@ -112,6 +114,9 @@ export function resolveTargetScript(scriptsDir: string, script: string): { path:
   if (!inside || inside.startsWith('..') || isAbsolute(inside)) throw new EnrollmentError(400, 'script_outside_scripts_dir')
   if (inside.split(sep)[0] === WRAPPER_DIR) throw new EnrollmentError(400, 'invalid_script')
   if (!statSync(path).isFile()) throw new EnrollmentError(400, 'invalid_script')
+  // Hermes picks the interpreter from the resolved file it is given, so the wrapper must too.
+  const kind = kindOf(path)
+  if (!kind) throw new EnrollmentError(400, 'unsupported_script_type')
   return { path, relative: inside.split(sep).join('/'), kind }
 }
 

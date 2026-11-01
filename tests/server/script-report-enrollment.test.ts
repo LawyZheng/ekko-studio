@@ -186,6 +186,17 @@ describe('script report enrollment', () => {
     expect(cli.calls).toEqual([])
   })
 
+  it('uses the interpreter of the resolved target behind an in-directory symlink alias', async () => {
+    symlinkSync(join(hermesHome, 'scripts', 'reports', 'digest.py'), join(hermesHome, 'scripts', 'reports', 'alias.sh'))
+    const { status, body } = await enroll({ script: 'reports/alias.sh' })
+    expect(status).toBe(201)
+    expect(cli.calls[0]).toEqual(expect.arrayContaining(['--script', 'reports/digest.py']))
+    const manifest = JSON.parse(readFileSync(m.paths.scriptReportManifestPath(body.binding.binding_id, 1), 'utf8'))
+    expect(manifest.target).toMatchObject({ kind: 'python', path: join(hermesHome, 'scripts', 'reports', 'digest.py') })
+    const run = spawnSync(PYTHON, [join(hermesHome, 'scripts', body.binding.wrapper_script)], { cwd: join(hermesHome, 'scripts', 'ekko-script-reports'), encoding: 'utf8' })
+    expect(run).toMatchObject({ status: 0, stdout: 'digest ready\n' })
+  })
+
   it('leaves the job paused when resume fails', async () => {
     cli.failResume = true
     const failed = await enroll()
