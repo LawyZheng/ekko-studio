@@ -160,6 +160,30 @@ _KEY = re.compile(r"(?<![A-Za-z0-9_.\-])([\"']?)([A-Za-z0-9_.\-]{1,128})\1[ \t]{
 _VALUE = re.compile(r"\"(?:[^\"\\\n]|\\.)*\"?|'(?:[^'\\\n]|\\.)*'?|[^\s,;&]+")
 
 
+def _structured_end(text: str, start: int) -> int:
+    """End of the balanced object or array at ``start`` (quotes and escapes honoured); the end of the
+    text when it never closes, so an unparseable secret value is omitted whole."""
+    depth, quote, escaped = 0, "", False
+    for index in range(start, len(text)):
+        ch = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(text)
+
+
 def _redact_assignments(text: str) -> str:
     out, copied, pos = [], 0, 0
     while True:
@@ -169,12 +193,16 @@ def _redact_assignments(text: str) -> str:
         pos = key.end()
         if not _SECRET_NAME.search(key[2]):
             continue
-        value = _VALUE.match(text, pos)
-        if value is None:
-            continue
+        if pos < len(text) and text[pos] in "[{":
+            end = _structured_end(text, pos)
+        else:
+            value = _VALUE.match(text, pos)
+            if value is None:
+                continue
+            end = value.end()
         out.append(text[copied:pos])
         out.append("[REDACTED]")
-        copied = pos = value.end()
+        copied = pos = end
     out.append(text[copied:])
     return "".join(out)
 _RULES = [
@@ -182,7 +210,8 @@ _RULES = [
     (re.compile(r"(?im)^([ \t]*(?:proxy-)?authorization[ \t]*[:=][ \t]*).+$"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=\-]{8,}"), r"\1 [REDACTED]"),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]{0,31}://)[^/\s:@]{1,256}:[^/\s@]{1,256}@"), r"\1[REDACTED]@"),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[REDACTED JWT]"),
+    # A JWT starts at the beginning of a base64url run, so each run is scanned once.
+    (re.compile(r"(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[REDACTED JWT]"),
     (re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_\-]{16,}"), "[REDACTED KEY]"),
     (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"), "[REDACTED KEY]"),
     (re.compile(r"\bxox[abposr]-[A-Za-z0-9\-]{10,}"), "[REDACTED KEY]"),
