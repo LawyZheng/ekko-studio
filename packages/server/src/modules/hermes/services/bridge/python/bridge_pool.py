@@ -512,11 +512,6 @@ class AgentPool:
             with _profile_env(profile):
                 _refresh_worker_profile_env()
                 _refresh_approval_allowlist()
-                try:
-                    # Before tools are resolved for this agent: cron session binding and availability.
-                    _studio_notifications().install_cron_binding_middleware()
-                except Exception as exc:
-                    print(f"[hermes_bridge] cron session binding unavailable: {exc}", file=sys.stderr, flush=True)
                 discovered_mcp_tools = _discover_bridge_mcp_tools()
                 cfg = _load_cfg()
                 resolved_model = requested_model or _resolve_model(cfg)
@@ -2007,10 +2002,6 @@ class AgentPool:
                     )
                 except Exception:
                     session_context_tokens = None
-                try:
-                    _studio_notifications().install_cron_binding_middleware()
-                except Exception as exc:
-                    print(f"[hermes_bridge] cron session binding unavailable: {exc}", file=sys.stderr, flush=True)
                 try:
                     self._enter_exec_ask_scope()
                     exec_ask_scope_entered = True
