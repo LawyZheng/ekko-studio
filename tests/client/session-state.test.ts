@@ -243,4 +243,66 @@ describe('session state subscription', () => {
     store.markRead('person-main-one')
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'person-main-one', messageId: 10, unreadRevision: 4, generation: 'g' }, expect.any(Function))
   })
+
+  it('does not let an open of a deleted session clear a mark on a recreated one', async () => {
+    const viewed = ref<string | null>(null)
+    const store = useSessionStateStore()
+    mount(defineComponent({ setup() { useSessionReadState(() => viewed.value); return () => null } }))
+    const socket = transport.sockets[0]
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 1, generation: 'g1' })] })
+    store.acknowledge('chat')
+    viewed.value = 'chat'; await nextTick()
+    // Reconnected after the session was recreated with the same id and marked at the same revision.
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 1, generation: 'g2' })] })
+    await nextTick()
+    expect(socket.emit).not.toHaveBeenCalled()
+    store.acknowledge('chat'); await nextTick()
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g2' }, expect.any(Function))
+  })
+
+  it('treats Back and Forward as opening a conversation, even into a replaced history entry', async () => {
+    const store = useSessionStateStore(); store.start()
+    const socket = transport.sockets[0]
+    const component = { render: () => null }
+    const router = createRouter({ history: createWebHashHistory(), routes: [{ path: '/', name: 'home', component },
+      { path: '/hermes/session/:sessionId', name: 'hermes.session', component }, { path: '/person', name: 'hermes.person', component }] })
+    trackSessionOpens(router)
+    const read = (sessionId: string) => status(sessionId, { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' })
+    const marked = (sessionId: string) => status(sessionId, { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 1, generation: 'g' })
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [read('chat'), read('other')] })
+    const settled = () => new Promise<void>(resolve => { const off = router.afterEach(() => { off(); resolve() }) })
+    await router.push('/hermes/session/chat') // Initial entry.
+    await router.push('/hermes/session/other')
+    await router.replace({ path: '/hermes/session/other', query: { tasks: '1' } }) // Replaced entry, e.g. a drawer.
+    await router.push('/hermes/session/chat')
+    socket.handlers.get('sessions.state.updated')(marked('other'))
+    let moved = settled(); router.back(); await moved
+    store.markRead('other')
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'other', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
+    socket.handlers.get('sessions.state.updated')(marked('chat'))
+    moved = settled(); router.back(); await moved // Back to the page's initial entry.
+    store.markRead('chat')
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
+  })
+
+  it('keeps the revision an explicit selection saw when its navigation finishes after a slow load', async () => {
+    const store = useSessionStateStore(); store.start()
+    const socket = transport.sockets[0]
+    const component = { render: () => null }
+    const router = createRouter({ history: createWebHashHistory(), routes: [{ path: '/', name: 'home', component },
+      { path: '/hermes/session/:sessionId', name: 'hermes.session', component }] })
+    trackSessionOpens(router)
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' })] })
+    await router.push('/')
+    store.acknowledge('chat') // e.g. a search result, which loads the transcript before navigating
+    socket.handlers.get('sessions.state.updated')(status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 1, generation: 'g' }))
+    await router.push('/hermes/session/chat')
+    store.markRead('chat')
+    expect(socket.emit).not.toHaveBeenCalled()
+    // The claim lasts for one navigation only.
+    await router.push('/')
+    await router.push('/hermes/session/chat')
+    store.markRead('chat')
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
+  })
 })

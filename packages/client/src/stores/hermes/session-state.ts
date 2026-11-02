@@ -6,18 +6,24 @@ import { onAuthInvalidated } from '@/api/auth-invalidation'
 import type { SessionListState, SessionStateSnapshot } from '../../../../shared/session-state'
 
 const MARK_UNREAD_TIMEOUT_MS = 10_000
+/** Identifies one manual mark: its revision within one session incarnation. */
+const markToken = (state: SessionListState) => state.unreadRevision == null ? null : `${state.generation ?? ''}#${state.unreadRevision}`
 
 export const useSessionStateStore = defineStore('sessionState', () => {
   const sessions = ref(new Map<string, SessionListState>())
   let socket: ReturnType<typeof connectSessionState> | null = null
   let stopAuth: (() => void) | null = null
-  const pendingReads = new Map<string, { messageId: number; attentionId: number; unreadRevision?: number }>()
-  // The manual-unread revision the user saw when they last chose to open each conversation.
-  // Passive views keep their older revision, so they cannot clear a newer manual mark.
-  const opened = reactive(new Map<string, number | 'pending'>())
+  const pendingReads = new Map<string, { messageId: number; attentionId: number; token?: string }>()
+  // The mark token the user saw when they last chose to open each conversation. Passive views
+  // keep their older token, so they cannot clear a newer mark or one on a recreated session.
+  const opened = reactive(new Map<string, string | 'pending'>())
+  // An explicit selection claims the navigation it starts; finishing that navigation after a
+  // slow load must not adopt a mark that arrived in the meantime.
+  let claimedOpen: string | null = null
   // An open made before any state arrived refers to the first state, never to a later mark.
   const bindOpened = (state: SessionListState) => {
-    if (opened.get(state.sessionId) === 'pending' && state.unreadRevision != null) opened.set(state.sessionId, state.unreadRevision)
+    const token = markToken(state)
+    if (opened.get(state.sessionId) === 'pending' && token) opened.set(state.sessionId, token)
   }
 
   function start() {
@@ -36,7 +42,7 @@ export const useSessionStateStore = defineStore('sessionState', () => {
       sessions.value.set(state.sessionId, state)
       const pending = pendingReads.get(state.sessionId)
       if (pending && state.readMessageId >= pending.messageId && (state.readAttentionId || 0) >= pending.attentionId
-        && (pending.unreadRevision == null || !state.manualUnread || state.unreadRevision !== pending.unreadRevision)) pendingReads.delete(state.sessionId)
+        && (pending.token == null || !state.manualUnread || markToken(state) !== pending.token)) pendingReads.delete(state.sessionId)
     })
     // Do not replay buffered read receipts after a reconnect; use its fresh snapshot.
     owner.on('disconnect', () => pendingReads.clear())
@@ -48,13 +54,25 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     socket = null
     previous?.removeAllListeners(); previous?.disconnect()
     stopAuth?.(); stopAuth = null
-    sessions.value.clear(); pendingReads.clear(); opened.clear()
+    sessions.value.clear(); pendingReads.clear(); opened.clear(); claimedOpen = null
+  }
+
+  function capture(sessionId: string) {
+    const state = sessions.value.get(sessionId)
+    opened.set(sessionId, (state && markToken(state)) ?? 'pending')
   }
 
   /** An intentional open (e.g. selecting the conversation) may clear its current manual mark. */
   function acknowledge(sessionId: string) {
-    const revision = sessions.value.get(sessionId)?.unreadRevision
-    opened.set(sessionId, revision ?? 'pending')
+    capture(sessionId)
+    claimedOpen = sessionId
+  }
+
+  /** Router callback; `opens` is false for the initial route and automatic replacements. */
+  function navigated(sessionId: string | null, opens: boolean) {
+    const claimed = claimedOpen
+    claimedOpen = null
+    if (opens && sessionId && sessionId !== claimed) capture(sessionId)
   }
 
   function markRead(sessionId: string) {
@@ -62,15 +80,15 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     if (!socket?.connected || state?.working || !state?.unread) return
     const messageId = state.lastMessageId
     const attentionId = state.lastAttentionId || 0
-    const clearsMark = !!state.manualUnread && opened.get(sessionId) === state.unreadRevision
+    const token = markToken(state)
+    const clearsMark = !!state.manualUnread && !!token && opened.get(sessionId) === token
     if (!clearsMark && messageId <= state.readMessageId && attentionId <= (state.readAttentionId || 0)) return
-    const unreadRevision = clearsMark ? state.unreadRevision : undefined
+    const receipt = { messageId, attentionId, token: clearsMark ? token! : undefined }
     const pending = pendingReads.get(sessionId)
-    if (pending?.messageId === messageId && pending.attentionId === attentionId && pending.unreadRevision === unreadRevision) return
-    const receipt = { messageId, attentionId, unreadRevision }
+    if (pending?.messageId === messageId && pending.attentionId === attentionId && pending.token === receipt.token) return
     pendingReads.set(sessionId, receipt)
     socket.emit('sessions.read', { sessionId, messageId, ...(state.lastAttentionId != null ? { attentionId } : {}),
-      ...(unreadRevision != null ? { unreadRevision, generation: state.generation } : {}) }, (result: { ok: boolean }) => {
+      ...(clearsMark ? { unreadRevision: state.unreadRevision, generation: state.generation } : {}) }, (result: { ok: boolean }) => {
       if (!result?.ok && pendingReads.get(sessionId) === receipt) pendingReads.delete(sessionId)
     })
   }
@@ -91,7 +109,7 @@ export const useSessionStateStore = defineStore('sessionState', () => {
   }
 
   onScopeDispose(stop)
-  return { sessions, start, stop, markRead, acknowledge, canMarkUnread, markUnread,
+  return { sessions, start, stop, markRead, acknowledge, navigated, canMarkUnread, markUnread,
     isWorking: (id: string, initialActivity = false) => sessions.value.get(id)?.working ?? initialActivity,
     isUnread: (id: string, initialUnread = false) => {
       const state = sessions.value.get(id)
@@ -107,14 +125,21 @@ function routedSessionId(route: RouteLocationNormalized): string | null {
 }
 
 /**
- * In-app navigation to another conversation (sidebar, search, pending actions, links) opens it
- * intentionally. The page's initial route and automatic `replace` selections stay passive, so a
- * refresh or a fallback selection cannot clear a manual unread mark.
+ * In-app navigation to another conversation (sidebar, search, pending actions, links, Back/Forward)
+ * opens it intentionally. The page's initial route and automatic `replace` selections stay
+ * passive, so a refresh or a fallback selection cannot clear a manual unread mark.
  */
 export function trackSessionOpens(router: Router) {
+  let traversal = false
+  // Only history traversal (Back/Forward, hash links) reaches history listeners. Its entry may
+  // have been created by a replacement, so its `replaced` flag says nothing about this navigation.
+  router.options.history.listen(() => { traversal = true })
   router.afterEach((to, from, failure) => {
-    const sessionId = routedSessionId(to)
-    if (failure || !sessionId || from === START_LOCATION || window.history.state?.replaced) return
-    if (sessionId !== routedSessionId(from)) useSessionStateStore().acknowledge(sessionId)
+    const historyMove = traversal
+    traversal = false
+    const sessionId = failure ? null : routedSessionId(to)
+    const opens = from !== START_LOCATION && (historyMove || !window.history.state?.replaced)
+      && sessionId !== routedSessionId(from)
+    useSessionStateStore().navigated(sessionId, opens)
   })
 }
