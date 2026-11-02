@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - base
+      - feat/cron-consent-foundation
 
 permissions:
   contents: read
