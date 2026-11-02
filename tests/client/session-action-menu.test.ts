@@ -71,6 +71,14 @@ describe('session action menu options', () => {
     ])
   })
 
+  it('offers the scheduled-result setup action only for sessions that can receive it', () => {
+    const labels = { outline: 'Outline', rename: 'Rename', open: 'Open', copyId: 'Copy', cronConsentSetup: 'Allow MCP setup' }
+    expect(buildActiveSessionMenuOptions(labels, { canRename: true, canOpen: true }).map(option => option.key))
+      .not.toContain('cron-consent-setup')
+    const options = buildActiveSessionMenuOptions(labels, { canRename: true, canOpen: true, canCronConsentSetup: true })
+    expect(describeOptions(options).at(-1)).toEqual({ key: 'cron-consent-setup', label: 'Allow MCP setup', icon: 'link', hasChildren: false })
+  })
+
   it('adds distinct icons to all ten top-level session context actions while preserving submenus', () => {
     const categoryChildren: DropdownOption[] = [
       { label: 'Work', key: 'category:1' },

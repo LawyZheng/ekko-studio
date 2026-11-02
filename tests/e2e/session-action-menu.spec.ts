@@ -125,13 +125,15 @@ test('consolidates current-session actions into one icon-bearing header menu', a
   await expect(sessionActionsButton).toHaveAttribute('aria-expanded', 'true')
   const semanticMenu = page.getByRole('menu', { name: 'Session actions' })
   await expect(semanticMenu).toBeVisible()
-  await expect(semanticMenu.getByRole('menuitem')).toHaveCount(4)
+  await expect(semanticMenu.getByRole('menuitem')).toHaveCount(5)
 
+  // An ordinary persisted Hermes chat also offers the opt-in MCP scheduled-result setup action last.
   const expectedItems = [
     ['Conversation Outline', 'outline'],
     ['Copy Session ID', 'copy'],
     ['Rename', 'rename'],
     ['Open in new window', 'open-new'],
+    ['Allow MCP scheduled-result setup', 'link'],
   ] as const
   await expect(page.locator('.n-dropdown-option:visible')).toHaveCount(expectedItems.length)
   await expect(page.locator('.n-dropdown-option:visible .n-dropdown-option-body__label'))
@@ -163,6 +165,18 @@ test('consolidates current-session actions into one icon-bearing header menu', a
   await expect.poll(() => page.evaluate(() => (
     window as typeof window & { __PW_SESSION_ACTIONS__?: SessionActionsHarness }
   ).__PW_SESSION_ACTIONS__?.clipboard.text)).toBe('session-actions-1')
+
+  // The setup action opens a model-free consent context for exactly this session and shows its id.
+  const prepared: Array<{ body: string | null; profile?: string }> = []
+  await page.route('**/api/hermes/cron/consent-contexts', async route => {
+    prepared.push({ body: route.request().postData(), profile: route.request().headers()['x-hermes-profile'] })
+    await route.fulfill({ status: 201, json: { context_id: 'ctx-session-actions-1', profile: 'research', session_id: 'session-actions-1', expires_at: Date.now() + 600_000 } })
+  })
+  await sessionActionsButton.click()
+  await visibleOption(page, 'Allow MCP scheduled-result setup').click()
+  await expect(sessionActionsButton).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByTestId('cron-consent-context')).toHaveText('ctx-session-actions-1')
+  expect(prepared).toEqual([{ body: JSON.stringify({ profile: 'research', session_id: 'session-actions-1' }), profile: 'research' }])
 })
 
 test('supports announced keyboard focus inside the current-session menu', async ({ page }) => {
@@ -183,7 +197,9 @@ test('supports announced keyboard focus inside the current-session menu', async 
 
   await page.keyboard.press('ArrowUp')
   await expect(menu).toBeVisible()
-  await expect(items.nth(3)).toBeFocused()
+  await expect(items).toHaveCount(5)
+  await expect(items.nth(4)).toBeFocused()
+  await expect(items.nth(4)).toHaveText('Allow MCP scheduled-result setup')
   await page.keyboard.press('Escape')
   await expect(trigger).toBeFocused()
 

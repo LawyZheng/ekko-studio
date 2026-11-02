@@ -1132,6 +1132,12 @@ export async function mockHermesApi(page: Page, options: MockHermesApiOptions = 
       return
     }
 
+    // Ordinary chats ask for pending cron consent requests; none by default.
+    if (pathname === '/api/hermes/cron/consent-requests' && request.method() === 'GET') {
+      await route.fulfill(jsonResponse({ requests: [] }))
+      return
+    }
+
     if (pathname === '/api/cron-history') {
       await route.fulfill(jsonResponse({ runs: [] }))
       return
