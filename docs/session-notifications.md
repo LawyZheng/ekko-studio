@@ -5,7 +5,7 @@ services, to an exact Studio session, whichever session is currently selected.
 
 | Producer | Delivery | Model context |
 | --- | --- | --- |
-| Scheduled cron fire of a job created in a Studio Hermes chat | Passive notice in the creating session's timeline, durable across reload and restart, sidebar attention raised once | Not automatic. The next intentional user question in that session receives a bounded, once-only context block |
+| Scheduled cron fire of an agent-backed job bound explicitly to a Studio Hermes chat | Passive notice in the creating session's timeline, durable across reload and restart, sidebar attention raised once | Not automatic. The next intentional user question in that session receives a bounded, once-only context block |
 | `terminal(background=true, notify_on_complete=true)` completion | Typed machine event that starts one turn in the owning session after any running turn | Yes: the native Hermes completion text, with the session's current history |
 | `POST /api/studio/sessions/{id}/notifications` from an external service | Passive notice, like a cron result | Like a cron result: once, on the next intentional question |
 
@@ -15,35 +15,27 @@ Hermes captures a cron `origin` only from a chat id. The Agent Bridge has none, 
 stores `deliver=local` and never routes the result back. Studio fixes this without
 changing Hermes:
 
-1. **Binding at creation.** The bridge wraps the registered `cronjob_manage` handler
-   (the legacy `cronjob` name resolves to it). Only creates made inside a Studio Agent
-   Bridge session are affected, and only when the request asks for this conversation:
-   `deliver` omitted, or containing `origin`. For those requests the bridge:
-   1. creates the job paused through the native tool;
-   2. writes a durable binding (Studio instance, profile, session, session generation,
-      job) to `<Web UI home>/session-notifications/cron-bindings.db`;
-   3. resumes the job through the native tool action, unless the request asked for
-      a paused job.
-
-   An `origin` *delivery* target is stored natively as `local`, never a home-channel
-   fallback. `failure_deliver` is the user's explicit choice and is passed to the native
-   tool byte-for-byte. If writing the binding fails, or Studio did not declare the owner's
-   session generation for this turn, the job stays paused and the tool reports the
-   failure. Explicit targets (`local`, `slack:…`, `all`, …) are passed through untouched,
-   are not bound, and are never mirrored.
+1. **Explicit binding.** `POST /api/hermes/cron/session-bindings` with
+   `{ profile, session_id, expected_session_generation, job_id }` binds an existing
+   agent-backed native job whose stored `deliver` is `local` to the session's frozen generation.
+   It writes `<Web UI home>/session-notifications/cron-bindings.db` and changes nothing in
+   Hermes. It needs an interactive login token (signed `purpose: "login"`) as a bearer header,
+   so a model run cannot bind on its own. Script-only jobs are refused
+   (`422 script_job_requires_script_report`), and explicit targets (`slack:…`, `all`, …) are
+   refused (`422 explicit_delivery_target`) and never mirrored.
 
    **Session generation.** `getSessionGeneration` returns the session's `generation_id`:
    assigned on first read, cleared by `clearSessionMessages` (reset), and new for a session
    recreated under the same id. Studio sends it with each bridge turn
-   (`studio_session_generation`), and the binding records it.
+   (`studio_session_generation`), and the binding records the generation the caller froze.
 
-   **Availability.** Hermes offers `cronjob_manage` only to interactive surfaces (its check
-   reads `HERMES_EXEC_ASK` and similar flags), and it caches both that verdict and the
-   resolved tool definitions process-wide. A resolution made outside a Studio run, such as
-   the post-turn background review, would therefore hide the tool from later sessions. The
-   bridge middleware marks the tool available in a Studio bridge worker and drops
-   previously cached availability (`invalidate_check_fn_cache`, `_clear_tool_defs_cache`).
-   It does this in memory only and changes no environment variable.
+   **No runtime patches.** Earlier versions wrapped the registered `cronjob_manage` handler
+   inside the Agent Bridge, replaced its availability check and cleared Hermes tool caches so
+   chat-created jobs were bound automatically. That in-memory modification of Hermes is
+   removed. Consequences: a job a model creates with `cronjob_manage` in a Studio chat is a
+   plain native job (`deliver=local`) and is not bound until the user binds it; and
+   `cronjob_manage` is offered to Studio bridge agents only when Hermes' own availability check
+   allows it.
 2. **Observation.** Every 15 seconds `ChatRunSocket` asks the profile's bridge worker
    (`studio_cron_observe`) for the terminal executions of bound jobs. The worker reads
    the native execution ledger (`list_executions`) a bounded page of 50 at a time: the
