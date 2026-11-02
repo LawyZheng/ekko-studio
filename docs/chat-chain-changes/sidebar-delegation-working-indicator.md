@@ -78,7 +78,8 @@ sends them only for the mark the user saw at the moment of intentionally opening
 the conversation: selecting it in the sidebar (including the one already open),
 in search or from a Person flow, or moving to it with Back/Forward or a link such
 as a notification click. That moment is recorded once and never recaptured, so a
-mark that arrives while the transcript loads stays unread. Programmatic pushes and
+mark that arrives while the transcript loads stays unread. A selection made before
+any state has arrived names no mark, so a mark shown later needs another selection. Programmatic pushes and
 replacements, the page's initial route (refresh, a new window or tab, a deep link),
 reconnect snapshots and receipts from other devices stay passive: they still
 advance cursors but cannot clear a newer mark. Marking the open conversation keeps

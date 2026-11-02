@@ -190,12 +190,15 @@ describe('session state subscription', () => {
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 6, generation: 'g' }, expect.any(Function))
   })
 
-  it('applies an open made before the first state and forgets opens after logout', async () => {
+  it('does not let an open made before any state clear a mark that may be newer, and forgets opens after logout', async () => {
     const store = useSessionStateStore(); store.start()
     let socket = transport.sockets[0]
     const marked = status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 3, generation: 'g' })
-    store.acknowledge('chat')
+    store.acknowledge('chat') // Selected before the first snapshot; another device marks it meanwhile.
     socket.handlers.get('sessions.state.snapshot')({ sessions: [marked] })
+    store.markRead('chat')
+    expect(socket.emit).not.toHaveBeenCalled()
+    store.acknowledge('chat')
     store.markRead('chat')
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 3, generation: 'g' }, expect.any(Function))
     transport.invalidate!()
@@ -206,7 +209,7 @@ describe('session state subscription', () => {
     expect(socket.emit).not.toHaveBeenCalled()
   })
 
-  it('binds an open made before the first state to that state, not to a later mark', async () => {
+  it('does not let an open made before any state clear a mark that arrives while loading', async () => {
     const viewed = ref<string | null>(null)
     const store = useSessionStateStore()
     mount(defineComponent({ setup() { useSessionReadState(() => viewed.value); return () => null } }))

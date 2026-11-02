@@ -16,12 +16,7 @@ export const useSessionStateStore = defineStore('sessionState', () => {
   const pendingReads = new Map<string, { messageId: number; attentionId: number; token?: string }>()
   // The mark token the user saw at the moment they chose to open each conversation. It is never
   // recaptured later, so passive views, slow loads and other devices cannot clear a newer mark.
-  const opened = reactive(new Map<string, string | 'pending'>())
-  // An open made before any state arrived refers to the first state, never to a later mark.
-  const bindOpened = (state: SessionListState) => {
-    const token = markToken(state)
-    if (opened.get(state.sessionId) === 'pending' && token) opened.set(state.sessionId, token)
-  }
+  const opened = reactive(new Map<string, string>())
 
   function start() {
     if (socket) return
@@ -30,12 +25,10 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     owner.on('sessions.state.snapshot', (snapshot: SessionStateSnapshot) => {
       if (socket !== owner) return
       pendingReads.clear()
-      snapshot.sessions.forEach(bindOpened)
       sessions.value = new Map(snapshot.sessions.map(state => [state.sessionId, state]))
     })
     owner.on('sessions.state.updated', (state: SessionListState) => {
       if (socket !== owner) return
-      bindOpened(state)
       sessions.value.set(state.sessionId, state)
       const pending = pendingReads.get(state.sessionId)
       if (pending && state.readMessageId >= pending.messageId && (state.readAttentionId || 0) >= pending.attentionId
@@ -54,10 +47,14 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     sessions.value.clear(); pendingReads.clear(); opened.clear()
   }
 
-  /** Call when the user chooses to open a conversation; it may clear the mark seen right now. */
+  /**
+   * Call when the user chooses to open a conversation; it may clear the mark seen right now. Without
+   * state there is no mark to name, so a mark that shows up later needs another selection.
+   */
   function acknowledge(sessionId: string) {
     const state = sessions.value.get(sessionId)
-    opened.set(sessionId, (state && markToken(state)) ?? 'pending')
+    const token = state && markToken(state)
+    if (token) opened.set(sessionId, token)
   }
 
   function markRead(sessionId: string) {
