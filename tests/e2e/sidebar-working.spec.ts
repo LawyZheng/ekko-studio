@@ -35,6 +35,57 @@ test('updates an unopened single chat from shared background and read states', a
   await page.screenshot({ path: testInfo.outputPath('single-chat-shared-state.png') })
 })
 
+test('marks the open chat unread from its context menu and reads it only when selected again', async ({ page }, testInfo) => {
+  await authenticate(page)
+  const sessions = ['Current conversation', 'Remote conversation'].map((title, index) => ({
+    id: `manual-unread-${index}`, title, profile: 'default', source: 'builtin_agent', agent: 'ekko-agent',
+    model: 'test-model', provider: 'test-provider', started_at: 2 - index, last_active: 2 - index, message_count: 1,
+  }))
+  await page.addInitScript(() => {
+    ;(window as any).__PW_CHAT_SOCKET_RESUMES__ = Object.fromEntries([0, 1].map(index => [`manual-unread-${index}`, {
+      session_id: `manual-unread-${index}`, isWorking: false, events: [], messages: [],
+    }]))
+  })
+  await mockHermesApi(page, { sessions })
+  await page.goto('/#/hermes/session/manual-unread-0')
+  const current = page.locator('.session-item').filter({ hasText: 'Current conversation' }).first()
+  const remote = page.locator('.session-item').filter({ hasText: 'Remote conversation' }).first()
+  await expect(current).toBeVisible()
+  await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__?.allSockets?.some((socket: any) => socket.options?.query?.session_state === '1'))).toBe(true)
+  const read = { working: false, backgroundPending: 0, lastMessageId: 10, readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0 }
+  const publish = (state: Record<string, unknown>) => page.evaluate(state => {
+    const socket = (window as any).__PW_CHAT_SOCKET__.allSockets.find((socket: any) => socket.options?.query?.session_state === '1')
+    socket.__trigger('sessions.state.updated', state)
+  }, state)
+  const reads = () => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.emitted.filter((e: any) => e.event === 'sessions.read').map((e: any) => e.payload))
+  await publish({ sessionId: 'manual-unread-0', ...read })
+  await publish({ sessionId: 'manual-unread-1', ...read, readMessageId: 0, unread: true })
+  const option = page.locator('.n-dropdown-option').filter({ hasText: 'Mark as unread' })
+
+  await remote.click({ button: 'right' })
+  await expect(page.locator('.n-dropdown-option').filter({ hasText: 'Rename' })).toBeVisible()
+  await expect(option).toHaveCount(0)
+  await page.mouse.click(900, 250)
+  await expect(page.locator('.n-dropdown-option:visible')).toHaveCount(0)
+
+  await current.click({ button: 'right' })
+  await option.click()
+  await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks?.map((a: any) => a.payload))).toEqual([{ sessionId: 'manual-unread-0', unreadRevision: 0 }])
+  await page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks[0].ack(null, { ok: true, changed: true }))
+  await publish({ sessionId: 'manual-unread-0', ...read, unread: true, manualUnread: true, unreadRevision: 7 })
+  await expect(current.locator('.session-item-unread-dot')).toBeVisible()
+  await expect(page).toHaveURL(/manual-unread-0/)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await page.waitForTimeout(200)
+  expect(await reads()).not.toContainEqual(expect.objectContaining({ sessionId: 'manual-unread-0' }))
+  await page.screenshot({ path: testInfo.outputPath('chat-manual-unread-open.png') })
+
+  await current.click()
+  await expect.poll(reads).toContainEqual({ sessionId: 'manual-unread-0', messageId: 10, unreadRevision: 7 })
+  await publish({ sessionId: 'manual-unread-0', ...read, unreadRevision: 7 })
+  await expect(current.locator('.session-item-unread-dot')).toHaveCount(0)
+})
+
 // All session data and socket traffic in this test are fixtures, not live tasks.
 test('restores sidebar delegation activity on reload and keeps it scoped during navigation', async ({ page }, testInfo) => {
   await authenticate(page, TEST_ACCESS_KEY, 'research')

@@ -188,6 +188,39 @@ describe('session action menu options', () => {
     expect(options[0]?.label).toBe('Unpin')
     expect(options.map(option => option.key)).not.toContain('archive')
     expect(options.map(option => option.key)).not.toContain('model')
+    expect(options.map(option => option.key)).not.toContain('mark-unread')
     expect(options.every(option => typeof (option as DropdownOption & { icon?: unknown }).icon === 'function')).toBe(true)
+  })
+
+  it('offers Mark as unread after pinning when the conversation can be marked', () => {
+    const options = buildSessionContextMenuOptions({
+      pinned: false,
+      includeArchive: false,
+      includeModel: false,
+      includeMarkUnread: true,
+      categoryChildren: [],
+      labels: {
+        pin: 'Pin',
+        unpin: 'Unpin',
+        markUnread: 'Mark as unread',
+        rename: 'Rename',
+        archive: 'Archive',
+        workspace: 'Set Workspace',
+        model: 'Set Model',
+        category: 'Move to category',
+        export: 'Export',
+        exportFull: 'Full Export (JSON)',
+        exportCompressed: 'Compressed Export (TXT)',
+        open: 'Open in new tab',
+        copyLink: 'Copy Session Link',
+        copyId: 'Copy Session ID',
+      },
+    })
+
+    expect(describeOptions(options).slice(0, 3)).toEqual([
+      { key: 'pin', label: 'Pin', icon: 'pin', hasChildren: false },
+      { key: 'mark-unread', label: 'Mark as unread', icon: 'unread', hasChildren: false },
+      { key: 'rename', label: 'Rename', icon: 'rename', hasChildren: false },
+    ])
   })
 })

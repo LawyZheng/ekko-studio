@@ -878,6 +878,7 @@ describe('AppRelayClient', () => {
 
   it.each([
     ['/chat-run', 'app.events.subscribe'],
+    ['/chat-run', 'sessions.unread'],
     ['/group-chat', 'load_room_agent_activities'],
   ])('bridges %s %s subscriptions through cloud relay transport', async (namespace, event) => {
     const { startAppRelayClient } = await import('../../packages/server/src/modules/studio/services/app-relay/client')

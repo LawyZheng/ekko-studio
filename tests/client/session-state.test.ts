@@ -7,8 +7,9 @@ import { mount } from '@vue/test-utils'
 const transport = vi.hoisted(() => ({ sockets: [] as any[], invalidate: null as null | (() => void) }))
 vi.mock('@/api/studio/session-state', () => ({ connectSessionState: () => {
   const handlers = new Map<string, Function>()
-  const socket = { connected: true, handlers, on: vi.fn((event, handler) => handlers.set(event, handler)),
+  const socket: any = { connected: true, handlers, on: vi.fn((event, handler) => handlers.set(event, handler)),
     emit: vi.fn(), removeAllListeners: vi.fn(), disconnect: vi.fn() }
+  socket.timeout = vi.fn(() => socket)
   transport.sockets.push(socket)
   return socket
 } }))
@@ -123,6 +124,84 @@ describe('session state subscription', () => {
     wrapper.unmount()
     socket.emit.mockClear()
     window.dispatchEvent(new Event('focus'))
+    expect(socket.emit).not.toHaveBeenCalled()
+  })
+
+  it('offers manual unread only for read conversations the server can mark and reports the outcome', async () => {
+    const store = useSessionStateStore(); store.start()
+    const socket = transport.sockets[0]
+    const read = { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0 }
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', read), status('busy', { ...read, working: true }),
+      status('fresh', { unreadRevision: 0 }), status('legacy', { readMessageId: 10, unread: false })] })
+    expect(['chat', 'busy', 'fresh', 'legacy', 'missing'].map(id => store.canMarkUnread(id))).toEqual([true, false, false, false, false])
+    const outcomes: Array<[Error | null, any, boolean]> = [[null, { ok: true, changed: true }, true],
+      [null, { ok: true, changed: false }, false], [null, { ok: false }, false], [new Error('operation has timed out'), undefined, false]]
+    for (const [error, result, expected] of outcomes) {
+      const pending = store.markUnread('chat')
+      expect(socket.timeout).toHaveBeenLastCalledWith(expect.any(Number))
+      expect(socket.emit).toHaveBeenLastCalledWith('sessions.unread', { sessionId: 'chat', unreadRevision: 0 }, expect.any(Function))
+      socket.emit.mock.lastCall[2](error, result)
+      expect(await pending).toBe(expected)
+    }
+    socket.emit.mockClear()
+    expect(await store.markUnread('fresh')).toBe(false)
+    socket.connected = false
+    expect(await store.markUnread('chat')).toBe(false)
+    expect(socket.emit).not.toHaveBeenCalled()
+  })
+
+  it('keeps a manual mark through passive views until the conversation is opened again', async () => {
+    const viewed = ref<string | null>(null)
+    const store = useSessionStateStore()
+    mount(defineComponent({ setup() { useSessionReadState(() => viewed.value); return () => null } }))
+    const socket = transport.sockets[0]
+    const update = (changes: Record<string, unknown>) => socket.handlers.get('sessions.state.updated')(status('chat', changes))
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0 })] })
+    store.acknowledge('chat')
+    viewed.value = 'chat'; await nextTick()
+    expect(socket.emit).not.toHaveBeenCalled()
+    // Marked unread here or on another device while the conversation stays on screen.
+    update({ readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 5 }); await nextTick()
+    window.dispatchEvent(new Event('focus'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(socket.emit).not.toHaveBeenCalled()
+    expect(store.isUnread('chat')).toBe(true)
+    // New replies are still acknowledged, but without permission to clear the mark.
+    update({ lastMessageId: 11, readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 5 }); await nextTick()
+    expect(socket.emit).toHaveBeenCalledTimes(1)
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11 }, expect.any(Function))
+    update({ lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 5 }); await nextTick()
+    // A reconnect snapshot does not count as opening the conversation.
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 5 })] })
+    await nextTick()
+    expect(socket.emit).toHaveBeenCalledTimes(1)
+    // Selecting it again, even while it is already open, reads the mark.
+    store.acknowledge('chat'); await nextTick()
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 5 }, expect.any(Function))
+    store.acknowledge('chat'); await nextTick()
+    expect(socket.emit).toHaveBeenCalledTimes(2)
+    update({ lastMessageId: 11, readMessageId: 11, unread: false, manualUnread: false, unreadRevision: 5 }); await nextTick()
+    expect(socket.emit).toHaveBeenCalledTimes(2)
+    // A later mark of the same cursors is a new receipt rather than a duplicate.
+    update({ lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 6 }); await nextTick()
+    expect(socket.emit).toHaveBeenCalledTimes(2)
+    store.acknowledge('chat'); await nextTick()
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 6 }, expect.any(Function))
+  })
+
+  it('applies an open made before the first state and forgets opens after logout', async () => {
+    const store = useSessionStateStore(); store.start()
+    let socket = transport.sockets[0]
+    const marked = status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 3 })
+    store.acknowledge('chat')
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [marked] })
+    store.markRead('chat')
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 3 }, expect.any(Function))
+    transport.invalidate!()
+    store.start()
+    socket = transport.sockets[1]
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [marked] })
+    store.markRead('chat')
     expect(socket.emit).not.toHaveBeenCalled()
   })
 })
