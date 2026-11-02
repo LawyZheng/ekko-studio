@@ -74,14 +74,15 @@ Cursors, messages and notices are untouched.
 
 `unread` includes the manual flag. A read receipt clears it only when it names the
 current revision and generation and the account is still allowed. The client
-sends them only for the mark the user saw when intentionally opening the
-conversation: selecting it in the sidebar (including the one already open) or in
-search, or an in-app navigation to another conversation, including Back/Forward.
-A selection keeps the mark it saw even if its navigation finishes after a slow
-load. The page's initial route (refresh, a new window or tab, a deep link) and
-automatic `replace` selections stay passive. So do reconnect snapshots and receipts from other devices: they still
-advance cursors but cannot clear a newer mark. Marking the open conversation
-keeps it on screen with its dot until it is opened again.
+sends them only for the mark the user saw at the moment of intentionally opening
+the conversation: selecting it in the sidebar (including the one already open),
+in search or from a Person flow, or moving to it with Back/Forward or a link such
+as a notification click. That moment is recorded once and never recaptured, so a
+mark that arrives while the transcript loads stays unread. Programmatic pushes and
+replacements, the page's initial route (refresh, a new window or tab, a deep link),
+reconnect snapshots and receipts from other devices stay passive: they still
+advance cursors but cannot clear a newer mark. Marking the open conversation keeps
+it on screen with its dot until it is opened again.
 
 The existing chat store still owns execution listeners and composer/queue rules.
 Its per-background-session observers remain available for transcript delivery;

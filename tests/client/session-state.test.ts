@@ -221,7 +221,7 @@ describe('session state subscription', () => {
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
   })
 
-  it('counts in-app navigation to a conversation as opening it, but not the initial route or replacements', async () => {
+  it('reads a mark only after a selection or a history move, never after pushes, replacements or the initial route', async () => {
     const store = useSessionStateStore(); store.start()
     const socket = transport.sockets[0]
     const component = { render: () => null }
@@ -235,13 +235,12 @@ describe('session state subscription', () => {
     await router.push('/')
     await router.replace({ name: 'hermes.person', query: { session: 'person-main-one' } }) // An automatic selection.
     store.markRead('person-main-one')
+    await router.push('/hermes/session/chat') // Programmatic navigation without a selection.
+    store.markRead('chat')
     expect(socket.emit).not.toHaveBeenCalled()
-    await router.push('/hermes/session/chat')
+    store.acknowledge('chat') // e.g. selecting the open row again
     store.markRead('chat')
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 3, generation: 'g' }, expect.any(Function))
-    await router.push({ name: 'hermes.person', query: { session: 'person-main-one', message: '2' } })
-    store.markRead('person-main-one')
-    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'person-main-one', messageId: 10, unreadRevision: 4, generation: 'g' }, expect.any(Function))
   })
 
   it('does not let an open of a deleted session clear a mark on a recreated one', async () => {
@@ -285,24 +284,46 @@ describe('session state subscription', () => {
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
   })
 
-  it('keeps the revision an explicit selection saw when its navigation finishes after a slow load', async () => {
+  it('keeps the mark an explicit selection saw when its navigation finishes after a slow load', async () => {
     const store = useSessionStateStore(); store.start()
     const socket = transport.sockets[0]
     const component = { render: () => null }
     const router = createRouter({ history: createWebHashHistory(), routes: [{ path: '/', name: 'home', component },
       { path: '/hermes/session/:sessionId', name: 'hermes.session', component }] })
     trackSessionOpens(router)
-    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' })] })
-    await router.push('/')
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' }), status('other')] })
+    await router.push('/hermes/session/other')
     store.acknowledge('chat') // e.g. a search result, which loads the transcript before navigating
+    // Unrelated navigations while it loads, then another device marks the conversation.
+    await router.replace({ path: '/hermes/session/other', query: { tasks: '1' } })
+    await router.push({ path: '/hermes/session/other', query: { tasks: '1' } }).catch(() => undefined)
     socket.handlers.get('sessions.state.updated')(status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 1, generation: 'g' }))
     await router.push('/hermes/session/chat')
     store.markRead('chat')
-    expect(socket.emit).not.toHaveBeenCalled()
-    // The claim lasts for one navigation only.
-    await router.push('/')
-    await router.push('/hermes/session/chat')
+    expect(socket.emit).not.toHaveBeenCalledWith('sessions.read', expect.objectContaining({ sessionId: 'chat' }), expect.any(Function))
+    store.acknowledge('chat')
     store.markRead('chat')
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
   })
+
+  it('does not let a failed Back navigation open the next automatically selected conversation', async () => {
+    const store = useSessionStateStore(); store.start()
+    const socket = transport.sockets[0]
+    const component = { render: () => null }
+    const router = createRouter({ history: createWebHashHistory(), routes: [{ path: '/', name: 'home', component },
+      { path: '/hermes/session/:sessionId', name: 'hermes.session', component }] })
+    trackSessionOpens(router)
+    let fail = false
+    router.beforeEach(() => { if (fail) throw new Error('blocked') })
+    const failed = new Promise<void>(resolve => router.onError(() => resolve()))
+    const marked = (sessionId: string) => status(sessionId, { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 1, generation: 'g' })
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [marked('a'), marked('b'), marked('c')] })
+    await router.push('/hermes/session/a')
+    await router.push('/hermes/session/b')
+    fail = true; router.back(); await failed; fail = false
+    await router.replace('/hermes/session/c') // e.g. the fallback after deleting a conversation
+    store.markRead('c')
+    expect(socket.emit).not.toHaveBeenCalled()
+  })
+
 })

@@ -440,10 +440,12 @@ function flowAction(flow: PersonFlow, action: 'stop' | 'resume') {
 }
 function openFlowResult(sessionId: string, messageId: number) {
   showPanel.value = false
+  sessionStates.acknowledge(sessionId)
   return router.push({ name: 'hermes.person', query: { session: sessionId, message: String(messageId) } })
 }
 function openFlowConversation(sessionId: string) {
   showPanel.value = false
+  sessionStates.acknowledge(sessionId)
   return router.push({ name:'hermes.person',query:{ session:sessionId } })
 }
 function openFlowTask(taskId: string) { showPanel.value = false; chatExecutionId.value = undefined; chatTaskId.value = taskId }

@@ -1,6 +1,6 @@
 import { ref, reactive, onScopeDispose } from 'vue'
 import { defineStore } from 'pinia'
-import { START_LOCATION, type RouteLocationNormalized, type Router } from 'vue-router'
+import type { RouteLocation, Router } from 'vue-router'
 import { connectSessionState } from '@/api/studio/session-state'
 import { onAuthInvalidated } from '@/api/auth-invalidation'
 import type { SessionListState, SessionStateSnapshot } from '../../../../shared/session-state'
@@ -14,12 +14,9 @@ export const useSessionStateStore = defineStore('sessionState', () => {
   let socket: ReturnType<typeof connectSessionState> | null = null
   let stopAuth: (() => void) | null = null
   const pendingReads = new Map<string, { messageId: number; attentionId: number; token?: string }>()
-  // The mark token the user saw when they last chose to open each conversation. Passive views
-  // keep their older token, so they cannot clear a newer mark or one on a recreated session.
+  // The mark token the user saw at the moment they chose to open each conversation. It is never
+  // recaptured later, so passive views, slow loads and other devices cannot clear a newer mark.
   const opened = reactive(new Map<string, string | 'pending'>())
-  // An explicit selection claims the navigation it starts; finishing that navigation after a
-  // slow load must not adopt a mark that arrived in the meantime.
-  let claimedOpen: string | null = null
   // An open made before any state arrived refers to the first state, never to a later mark.
   const bindOpened = (state: SessionListState) => {
     const token = markToken(state)
@@ -54,25 +51,13 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     socket = null
     previous?.removeAllListeners(); previous?.disconnect()
     stopAuth?.(); stopAuth = null
-    sessions.value.clear(); pendingReads.clear(); opened.clear(); claimedOpen = null
+    sessions.value.clear(); pendingReads.clear(); opened.clear()
   }
 
-  function capture(sessionId: string) {
+  /** Call when the user chooses to open a conversation; it may clear the mark seen right now. */
+  function acknowledge(sessionId: string) {
     const state = sessions.value.get(sessionId)
     opened.set(sessionId, (state && markToken(state)) ?? 'pending')
-  }
-
-  /** An intentional open (e.g. selecting the conversation) may clear its current manual mark. */
-  function acknowledge(sessionId: string) {
-    capture(sessionId)
-    claimedOpen = sessionId
-  }
-
-  /** Router callback; `opens` is false for the initial route and automatic replacements. */
-  function navigated(sessionId: string | null, opens: boolean) {
-    const claimed = claimedOpen
-    claimedOpen = null
-    if (opens && sessionId && sessionId !== claimed) capture(sessionId)
   }
 
   function markRead(sessionId: string) {
@@ -109,7 +94,7 @@ export const useSessionStateStore = defineStore('sessionState', () => {
   }
 
   onScopeDispose(stop)
-  return { sessions, start, stop, markRead, acknowledge, navigated, canMarkUnread, markUnread,
+  return { sessions, start, stop, markRead, acknowledge, canMarkUnread, markUnread,
     isWorking: (id: string, initialActivity = false) => sessions.value.get(id)?.working ?? initialActivity,
     isUnread: (id: string, initialUnread = false) => {
       const state = sessions.value.get(id)
@@ -118,28 +103,21 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     backgroundCount: (id: string) => sessions.value.get(id)?.backgroundPending ?? 0 }
 })
 
-function routedSessionId(route: RouteLocationNormalized): string | null {
+function routedSessionId(route: Pick<RouteLocation, 'name' | 'params' | 'query'>): string | null {
   if (route.name === 'hermes.session') return typeof route.params.sessionId === 'string' ? route.params.sessionId : null
   if (route.name === 'hermes.person') return typeof route.query.session === 'string' ? route.query.session : null
   return null
 }
 
 /**
- * In-app navigation to another conversation (sidebar, search, pending actions, links, Back/Forward)
- * opens it intentionally. The page's initial route and automatic `replace` selections stay
- * passive, so a refresh or a fallback selection cannot clear a manual unread mark.
+ * Back/Forward and hash links (e.g. notification clicks) to another conversation open it
+ * intentionally, like selecting it. History listeners only see these traversals, at the moment the
+ * user acts. Programmatic pushes and replacements, the page's initial route and refreshes stay
+ * passive; explicit selections call `acknowledge` themselves.
  */
 export function trackSessionOpens(router: Router) {
-  let traversal = false
-  // Only history traversal (Back/Forward, hash links) reaches history listeners. Its entry may
-  // have been created by a replacement, so its `replaced` flag says nothing about this navigation.
-  router.options.history.listen(() => { traversal = true })
-  router.afterEach((to, from, failure) => {
-    const historyMove = traversal
-    traversal = false
-    const sessionId = failure ? null : routedSessionId(to)
-    const opens = from !== START_LOCATION && (historyMove || !window.history.state?.replaced)
-      && sessionId !== routedSessionId(from)
-    useSessionStateStore().navigated(sessionId, opens)
+  router.options.history.listen(to => {
+    const sessionId = routedSessionId(router.resolve(to))
+    if (sessionId && sessionId !== routedSessionId(router.currentRoute.value)) useSessionStateStore().acknowledge(sessionId)
   })
 }
