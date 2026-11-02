@@ -35,7 +35,26 @@ export interface ExternalNoticeView {
   url: string | null
 }
 
-export type StudioNoticeView = CronNoticeView | ExternalNoticeView
+/**
+ * Report of one invocation of an enrolled script wrapper. The invocation id is the wrapper's own
+ * identity; there is no native execution id and no claim that the invocation was scheduled.
+ */
+export interface ScriptReportNoticeView {
+  kind: 'script_report'
+  notification_id: number
+  disposition: string
+  identity_kind: 'wrapper_invocation'
+  job_id: string
+  job_name: string
+  invocation_id: string
+  outcome: string
+  exit_code: number | null
+  signal: number | null
+  reason: string | null
+  truncated: boolean
+}
+
+export type StudioNoticeView = CronNoticeView | ExternalNoticeView | ScriptReportNoticeView
 
 export interface StudioNoticeMessage {
   id: string
@@ -58,7 +77,20 @@ export function noticeToMessage(record: SessionNotificationRecord): StudioNotice
     display_role: 'system',
     content: text(payload.content),
     timestamp: Math.floor(record.created_at / 1000),
-    studio_notice: record.kind === 'external' ? {
+    studio_notice: record.kind === 'script_report' ? {
+      kind: 'script_report',
+      notification_id: record.id,
+      disposition: record.disposition,
+      identity_kind: 'wrapper_invocation',
+      job_id: text(payload.job_id),
+      job_name: text(payload.job_name) || text(payload.job_id),
+      invocation_id: text(payload.invocation_id),
+      outcome: text(payload.outcome),
+      exit_code: typeof payload.exit_code === 'number' ? payload.exit_code : null,
+      signal: typeof payload.signal === 'number' ? payload.signal : null,
+      reason: typeof payload.reason === 'string' ? payload.reason : null,
+      truncated: payload.truncated === true,
+    } : record.kind === 'external' ? {
       kind: 'external',
       notification_id: record.id,
       source: text(payload.source),
@@ -157,6 +189,10 @@ export function buildNoticeProjection(sessionId: string): { text: string; ids: n
       // Bounded metadata keeps the first notice projectable however its fields escape.
       header = `- External notification from source ${asData(meta.source)} titled ${asData(clip(meta.title, MAX_NAME_CHARS))}`
         + (meta.url ? ` (link ${asData(clip(meta.url, MAX_NAME_CHARS))})` : '')
+    } else if (meta.kind === 'script_report') {
+      header = `- Script invocation report for job ${asData(clip(meta.job_name, MAX_NAME_CHARS))} (invocation`
+        + ` ${asData(meta.invocation_id)}, outcome ${asData(meta.outcome)}; a wrapper report, not a native execution receipt)`
+      detail ||= `no result text: ${meta.reason || meta.disposition}`
     } else {
       const outcome = meta.success === false ? 'failed' : meta.status
       header = `- Scheduled task ${asData(clip(meta.job_name, MAX_NAME_CHARS))} (job ${asData(meta.job_id)},`

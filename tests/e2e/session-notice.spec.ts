@@ -88,3 +88,35 @@ test('renders an external notice as inert plain text with a click-only link', as
   await expect(link).toHaveAttribute('target', '_blank')
   expect(remote).toEqual([])
 })
+
+test('renders a script invocation report as plain text with its wrapper provenance', async ({ page }) => {
+  await authenticate(page)
+  await mockHermesApi(page)
+  await mockChatSocket(page)
+  await page.goto('/#/hermes/chat')
+  await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Watch the digest')
+  await page.getByRole('button', { name: 'Send' }).click()
+  await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
+  const content = '**3 new items** <b>raw</b>'
+  await page.evaluate(content => {
+    const state = (window as any).__PW_CHAT_SOCKET__
+    const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
+    state.latest.__trigger('run.started', { event: 'run.started', session_id: sid, run_id: 'script-run' })
+    state.latest.__trigger('run.completed', { event: 'run.completed', session_id: sid, run_id: 'script-run', output: 'Watching.' })
+    state.latest.__trigger('session.notice', {
+      event: 'session.notice', session_id: sid, attention: true,
+      message: {
+        id: 'studio-notice-4', session_id: sid, role: 'system', display_role: 'system', content,
+        timestamp: Math.floor(Date.now() / 1000) + 1,
+        studio_notice: { kind: 'script_report', notification_id: 4, disposition: 'notified', identity_kind: 'wrapper_invocation',
+          job_id: 'job1', job_name: 'Daily digest', invocation_id: '00000000-0000-4000-8000-000000000004', outcome: 'output',
+          exit_code: 0, signal: null, reason: null, truncated: false },
+      },
+    })
+  }, content)
+  const header = page.locator('.studio-notice-header').filter({ hasText: 'Daily digest' })
+  await expect(header.locator('.studio-notice-title')).toHaveText('Script “Daily digest” reported')
+  await expect(header.locator('.studio-notice-detail')).toContainText('not a native Hermes execution receipt')
+  await expect(page.locator('.studio-notice-text')).toHaveText(content)
+  await expect(page.locator('.markdown-body strong')).toHaveCount(0)
+})
