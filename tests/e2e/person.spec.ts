@@ -1264,6 +1264,44 @@ test('Person shows collaboration activity first and unread only after execution 
   await expect(row.locator('.session-item-agent-logo-wrap.streaming')).toHaveCount(0)
 })
 
+test('Person marks the open conversation unread from its menu and reads it only when selected again', async ({ page }, testInfo) => {
+  const { second } = await setupSessionModels(page)
+  await page.goto('/#/person?session=person-main-1')
+  await expect(page.locator('.person-title')).toHaveText('Person')
+  await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__?.allSockets?.some((socket: any) => socket.options?.query?.session_state === '1'))).toBe(true)
+  const read = { working: false, backgroundPending: 0, lastMessageId: 4, readMessageId: 4, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g1' }
+  const publish = (state: Record<string, unknown>) => page.evaluate(state => {
+    const socket = (window as any).__PW_CHAT_SOCKET__.allSockets.find((socket: any) => socket.options?.query?.session_state === '1')
+    socket.__trigger('sessions.state.updated', state)
+  }, state)
+  await publish({ sessionId: 'person-main-1', ...read })
+  await publish({ sessionId: second.id, ...read, working: true })
+  const current = page.locator('.person-sidebar .session-item').filter({ hasText: 'Person' })
+  const busy = page.locator('.person-sidebar .session-item').filter({ hasText: 'Second' })
+  const option = page.locator('.n-dropdown-option:visible').filter({ hasText: 'Mark as unread' })
+  await busy.click({ button: 'right' })
+  await expect(page.locator('.n-dropdown-option:visible').filter({ hasText: 'Rename' })).toBeVisible()
+  await expect(option).toHaveCount(0)
+  await page.mouse.click(900, 250)
+  await expect(page.locator('.n-dropdown-option:visible')).toHaveCount(0)
+
+  await current.click({ button: 'right' })
+  await option.click()
+  await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks?.map((a: any) => a.payload))).toEqual([{ sessionId: 'person-main-1', unreadRevision: 0, generation: 'g1' }])
+  await page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks[0].ack(null, { ok: true, changed: true }))
+  await publish({ sessionId: 'person-main-1', ...read, unread: true, manualUnread: true, unreadRevision: 9 })
+  await expect(current.locator('.session-item-unread-dot')).toBeVisible()
+  await expect(page).toHaveURL(/session=person-main-1/)
+  await expect(page.locator('.person-title')).toHaveText('Person')
+  expect(await emitted(page, 'sessions.read')).not.toContainEqual(expect.objectContaining({ sessionId: 'person-main-1' }))
+  await page.screenshot({ path: testInfo.outputPath('person-manual-unread-open.png') })
+
+  await current.click()
+  await expect.poll(() => emitted(page, 'sessions.read')).toContainEqual({ sessionId: 'person-main-1', messageId: 4, unreadRevision: 9, generation: 'g1' })
+  await publish({ sessionId: 'person-main-1', ...read, unreadRevision: 9 })
+  await expect(current.locator('.session-item-unread-dot')).toHaveCount(0)
+})
+
 test('Person receives relay activity over real sockets after the app presence connection', async ({ page }) => {
   const { state, second } = await setupSessionModels(page)
   const http = createServer()

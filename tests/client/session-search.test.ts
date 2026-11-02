@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   searchSessionsMock: vi.fn(),
   routerPushMock: vi.fn(),
   personRequestMock: vi.fn(),
+  acknowledgeMock: vi.fn(),
 }))
 
 vi.mock('@/api/person', () => ({ personRequest: apiMocks.personRequestMock }))
@@ -30,6 +31,10 @@ const chatStoreMock = vi.hoisted(() => ({
 
 vi.mock('@/stores/hermes/chat', () => ({
   useChatStore: () => chatStoreMock,
+}))
+
+vi.mock('@/stores/hermes/session-state', () => ({
+  useSessionStateStore: () => ({ acknowledge: apiMocks.acknowledgeMock }),
 }))
 
 const routerCurrentRoute = { value: { name: 'hermes.logs' } }
@@ -244,6 +249,8 @@ describe('session search modal', () => {
     expect(chatStoreMock.loadSessions).toHaveBeenCalled()
     expect(chatStoreMock.switchSession).toHaveBeenCalledWith('match-1', '17')
     expect(apiMocks.routerPushMock).toHaveBeenCalledWith({ name: 'hermes.session', params: { sessionId: 'match-1' } })
+    // Choosing a result is an intentional open, even for the conversation already shown.
+    expect(apiMocks.acknowledgeMock).toHaveBeenCalledWith('match-1')
   })
 
   it('searches only Person conversations and navigates to the original matched message', async () => {
@@ -262,6 +269,7 @@ describe('session search modal', () => {
     expect(apiMocks.fetchSessionsMock).not.toHaveBeenCalled()
     await wrapper.get('button.result-item').trigger('click')
     expect(apiMocks.routerPushMock).toHaveBeenCalledWith({ name: 'hermes.person', query: { session: 'person-main-B', message: '73' } })
+    expect(apiMocks.acknowledgeMock).toHaveBeenCalledWith('person-main-B')
     expect(chatStoreMock.switchSession).not.toHaveBeenCalled()
     wrapper.unmount()
   })

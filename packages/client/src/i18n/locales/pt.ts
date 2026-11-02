@@ -1401,6 +1401,8 @@ export default {
     openSessionInNewWindow: 'Abrir em nova janela',
     sessionLinkCopied: 'Session link copied',
     copySessionId: 'Copiar ID da sessão',
+    markUnread: 'Marcar como não lida',
+    markUnreadFailed: 'Não foi possível marcar como não lida',
     export: 'Exportar',
     editConfig: 'Editar configuração',
     exportFull: 'Exportação completa (JSON)',

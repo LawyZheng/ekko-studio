@@ -57,6 +57,34 @@ pages do not mark conversations read. Fresh snapshots recover read and execution
 state after disconnects. Login-disabled installations use a separate local scope;
 shared-session guests cannot subscribe to account state.
 
+### Manual unread
+
+The ordinary chat and Person context menus offer **Mark as unread** for a
+persisted conversation whose server state is read and idle. Each state carries
+`manualUnread`, `unreadRevision` and the session `generation` (the existing
+`sessions.generation_id`, assigned on first read and replaced when a session is
+reset or recreated). `sessions.unread` sends `{ sessionId, unreadRevision,
+generation }` and acknowledges `{ ok, changed }`. The server sets an
+account-specific `manual_unread` flag in `session_read_state` only when the
+generation and stored revision still match, then raises the revision, so a
+retried or stale request changes nothing. Working, unknown, excluded or
+unauthorized sessions are rejected, and the stored account is re-read (the
+login-disabled local scope has none). Empty conversations can be marked.
+Cursors, messages and notices are untouched.
+
+`unread` includes the manual flag. A read receipt clears it only when it names the
+current revision and generation and the account is still allowed. The client
+sends them only for the mark the user saw at the moment of intentionally opening
+the conversation: selecting it in the sidebar (including the one already open),
+in search or from a Person flow, or moving to it with Back/Forward or a link such
+as a notification click. That moment is recorded once and never recaptured, so a
+mark that arrives while the transcript loads stays unread. A selection made before
+any state has arrived names no mark, so a mark shown later needs another selection. Programmatic pushes and
+replacements, the page's initial route (refresh, a new window or tab, a deep link),
+reconnect snapshots and receipts from other devices stay passive: they still
+advance cursors but cannot clear a newer mark. Marking the open conversation keeps
+it on screen with its dot until it is opened again.
+
 The existing chat store still owns execution listeners and composer/queue rules.
 Its per-background-session observers remain available for transcript delivery;
 the account subscription owns the list's synchronized appearance and unread dot.
@@ -71,9 +99,13 @@ cannot show another conversation's tasks.
 
 - `tests/server/session-state-sync.test.ts`: real Socket.IO devices, background-only
   activity, shared read receipts, stale cursors, reconnect/restart, ownership,
-  profile boundaries and the login-disabled local scope.
+  profile boundaries and the login-disabled local scope; manual unread revisions,
+  stale/duplicate requests, database reopen, same-id recreation and notices.
 - `tests/client/session-state.test.ts`: authoritative snapshots, receipts, visible
-  session ownership and account invalidation.
+  session ownership and account invalidation; manual unread only cleared by an
+  intentional selection.
+- `tests/e2e/sidebar-working.spec.ts` and `tests/e2e/person.spec.ts`: Mark as
+  unread from the ordinary and Person menus while the conversation is open.
 - `tests/client/session-state-transport.test.ts`: real client transport after an
   existing presence connection, collaboration activity, two-device read receipts,
   completion and reconnect snapshots.

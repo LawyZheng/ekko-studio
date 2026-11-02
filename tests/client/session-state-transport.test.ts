@@ -33,7 +33,7 @@ async function device() {
 beforeEach(async () => {
   vi.stubGlobal('localStorage', { getItem: () => 'default' })
   state.db = new DatabaseSync(':memory:')
-  state.db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,profile TEXT DEFAULT 'default',source TEXT DEFAULT 'builtin_agent',studio_user_id TEXT);
+  state.db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,profile TEXT DEFAULT 'default',source TEXT DEFAULT 'builtin_agent',studio_user_id TEXT,generation_id TEXT NOT NULL DEFAULT '');
     CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT,role TEXT,content TEXT);
     INSERT INTO sessions(id,studio_user_id) VALUES ('person-main-creator','1'),('person-main-recipient','1');`)
   runtime.clear()

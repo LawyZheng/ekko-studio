@@ -996,7 +996,7 @@ describe('LocalAppRelayServer', () => {
     })))
   })
 
-  it.each([['/chat-run', 'app.events.subscribe'], ['/group-chat', 'load_room_agent_activities']])('bridges %s %s over local and manually addressed relay', async (ns, event) => {
+  it.each([['/chat-run', 'app.events.subscribe'], ['/chat-run', 'sessions.unread'], ['/group-chat', 'load_room_agent_activities']])('bridges %s %s over local and manually addressed relay', async (ns, event) => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
     const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')

@@ -1227,6 +1227,7 @@ function makeSocket(url, options) {
     },
     emit(event, payload, ack) {
       state.emitted.push({ event, payload })
+      if (typeof ack === 'function' && event === 'sessions.unread') (state.acks || (state.acks = [])).push({ event, payload, ack })
       if ((event === 'run' || event === 'resume') && payload?.session_id) this.rooms.add(payload.session_id)
       if (typeof ack === 'function' && String(url).endsWith('/workflow')) {
         const data = event === 'workflow.status.subscribe'

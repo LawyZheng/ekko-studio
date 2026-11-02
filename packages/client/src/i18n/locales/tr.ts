@@ -618,6 +618,8 @@ export default {
   },
 
   chat: {
+    markUnread: 'Okunmadı olarak işaretle',
+    markUnreadFailed: 'Okunmadı olarak işaretlenemedi',
     sessionNotice: {
       cronTitle: 'Zamanlanmış görev “{name}” tamamlandı',
       cronFailedTitle: 'Zamanlanmış görev “{name}” başarısız oldu',

@@ -508,7 +508,8 @@ export class ChatRunSocket {
       return { working: !!state?.isWorking,
         collaborationPending: owner ? personCollaborationPendingCount(owner, sessionId) : 0,
         backgroundPending: owner ? Math.max(backgroundPending, personBackgroundTaskCount(owner, sessionId)) : backgroundPending }
-    }, (user, profile) => this.canAccessProfile(user, profile))
+    }, (user, profile) => this.canAccessProfile(user, profile),
+    (user, profile) => profile == null ? findUserById(user.id)?.status === 'active' : this.currentAccountAllowed(user, profile))
     this.stopPersonUpdates = onPersonUpdated(userId => this.syncPersonInteraction(userId))
     this.stopUsageUpdates = onRunUsageUpdated((sessionId, summary) => {
       const session = getSession(sessionId)
