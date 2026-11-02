@@ -118,6 +118,8 @@ vi.mock('../../packages/server/src/modules/studio/repositories/session-store', (
   createSession: localCreateSessionMock,
   addMessages: localAddMessagesMock,
   getSession: getSessionMock,
+  // The fork returns each session's generation so producers can fence delayed notices to it.
+  getSessionGeneration: vi.fn(() => 'generation-1'),
   updateSession: localUpdateSessionMock,
   updateSessionStats: localUpdateSessionStatsMock,
 }))
