@@ -1347,6 +1347,8 @@ export default {
     copySessionLink: 'Копировать ссылку на сеанс',
     openSessionInNewWindow: 'Открыть в новом окне',
     copySessionId: 'Копировать ID сеанса',
+    markUnread: 'Отметить как непрочитанное',
+    markUnreadFailed: 'Не удалось отметить как непрочитанное',
     export: 'Экспорт',
     editConfig: 'Редактировать конфигурацию',
     exportFull: 'Полный экспорт (JSON)',
