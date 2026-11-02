@@ -4,8 +4,8 @@ import { join } from 'path'
 import { config } from './config'
 
 /**
- * Studio-owned locations shared with the Hermes Agent Bridge for cron session bindings.
- * The bridge writes bindings; Studio reads them. Both live under the Web UI home.
+ * Studio-owned session notification state under the Web UI home. Studio writes cron session
+ * bindings only through its explicit binding API; the Agent Bridge never writes them.
  */
 export function sessionNotificationsDir(): string {
   return join(config.appHome, 'session-notifications')
@@ -30,10 +30,6 @@ export function studioInstanceId(): string {
   const created = randomUUID()
   writeFileSync(file, `${created}\n`, { encoding: 'utf-8', mode: 0o600 })
   return (cachedInstanceId = created)
-}
-
-export function sessionNotificationBridgeEnv(): string {
-  return JSON.stringify({ bindings_db: cronBindingsDbPath(), instance_id: studioInstanceId() })
 }
 
 export function resetSessionNotificationInstanceForTests(): void {

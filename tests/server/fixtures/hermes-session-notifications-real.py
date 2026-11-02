@@ -6,7 +6,6 @@ HERMES_HOME and Studio bindings database. Imports the installed Hermes source re
 
 import json
 import os
-import sqlite3
 import sys
 import time
 
@@ -20,22 +19,6 @@ import tools.terminal_tool  # noqa: E402,F401  registers terminal
 from gateway.session_context import set_session_vars  # noqa: E402
 from tools.registry import registry  # noqa: E402
 
-
-def bindings():
-    path = json.loads(os.environ[sn.STUDIO_CONFIG_ENV])["bindings_db"]
-    if not os.path.exists(path):
-        return []
-    conn = sqlite3.connect(path)
-    try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(cron_session_bindings)")}
-        generation = "session_generation" if "session_generation" in columns else "NULL"
-        return [list(row) for row in conn.execute(
-            "SELECT instance_id, profile, job_id, session_id, stored_deliver, requested_paused, "
-            f"{generation} FROM cron_session_bindings")]
-    except sqlite3.OperationalError:
-        return []
-    finally:
-        conn.close()
 
 
 def studio_session(session_id="sess-A", platform="agent_bridge", generation="gen-A1"):
@@ -52,103 +35,22 @@ def create(args, session_id="sess-A"):
                                         session_id=session_id))
 
 
-def job_view(job_id):
-    from cron.jobs import get_job
-    job = get_job(job_id)
-    return None if job is None else {key: job.get(key) for key in ("state", "enabled", "deliver", "failure_deliver", "origin")}
 
 
-def case_cron_default():
-    assert sn.install_cron_binding_middleware()
-    studio_session()
-    created = create({"prompt": "Summarize the day", "schedule": "30m", "name": "default-target"})
-    return {"created": created, "job": job_view(created["job_id"]), "bindings": bindings()}
-
-
-def case_cron_origin():
-    assert sn.install_cron_binding_middleware()
-    studio_session()
-    created = create({"prompt": "Summarize", "schedule": "30m", "name": "origin", "deliver": "origin",
-                      "failure_deliver": "origin"})
-    return {"created": created, "job": job_view(created["job_id"]), "bindings": bindings()}
-
-
-def case_cron_missing_generation():
-    assert sn.install_cron_binding_middleware()
-    studio_session(generation=None)
-    created = create({"prompt": "No generation", "schedule": "30m", "name": "no-generation"})
-    from cron.jobs import load_jobs
-    jobs = [job for job in load_jobs() if job.get("name") == "no-generation"]
-    return {"created": created, "job": job_view(jobs[0]["id"]) if jobs else None, "bindings": bindings()}
-
-
-def case_cron_failure_deliver_explicit():
-    assert sn.install_cron_binding_middleware()
-    studio_session()
-    created = create({"prompt": "Failures elsewhere", "schedule": "30m", "name": "failure-explicit",
-                      "failure_deliver": "slack:C9"})
-    return {"created": created, "job": job_view(created["job_id"]), "bindings": bindings()}
-
-
-def case_fresh_agent_tools():
-    """A fresh Studio bridge agent, built with no HERMES_EXEC_ASK in the environment, can schedule."""
+def case_registry_untouched():
+    """Building a Studio bridge agent never replaces a registered Hermes tool or its availability check."""
     home = os.environ["HERMES_HOME"]
     with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as handle:
         handle.write("model:\n  default: fake-model\n  provider: custom\n"
                      "  base_url: http://127.0.0.1:9/v1\n  api_key: fake-local-key\n")
-    os.environ.pop("HERMES_EXEC_ASK", None)
-    import model_tools
-    # Hermes resolves (and caches) tool definitions outside any run too, e.g. its post-turn
-    # background review; that must not decide what a Studio session can schedule.
-    model_tools.get_tool_definitions(quiet_mode=True)
+    entry = registry.get_entry("cronjob_manage")
+    before = (entry.handler, entry.check_fn)
     pool = _pool()
-    session = pool.get_or_create("sess-fresh", profile=None)
-    names = set(getattr(session.agent, "valid_tool_names", set()) or set())
-    # The deferred tool_call dispatcher re-resolves definitions at call time.
-    dispatch_names = {t["function"]["name"] for t in model_tools.get_tool_definitions(
-        quiet_mode=True, skip_tool_search_assembly=True) or []}
-    return {"cron_tool": "cronjob_manage" in names, "terminal_tool": "terminal" in names,
-            "cron_at_dispatch": "cronjob_manage" in dispatch_names,
-            "exec_ask_after": os.environ.get("HERMES_EXEC_ASK")}
-
-
-def case_cron_explicit():
-    assert sn.install_cron_binding_middleware()
-    studio_session()
-    local = create({"prompt": "Write files", "schedule": "30m", "name": "explicit-local", "deliver": "local"})
-    slack = create({"prompt": "Post", "schedule": "30m", "name": "explicit-slack", "deliver": "slack:C123",
-                    "failure_deliver": "local"})
-    return {"local": job_view(local["job_id"]), "slack": job_view(slack["job_id"]), "bindings": bindings(),
-            "slack_success": slack.get("success")}
-
-
-def case_cron_paused():
-    assert sn.install_cron_binding_middleware()
-    studio_session()
-    created = create({"prompt": "Later", "schedule": "30m", "name": "paused", "paused": True})
-    return {"created": created, "job": job_view(created["job_id"]), "bindings": bindings()}
-
-
-def case_cron_not_studio():
-    assert sn.install_cron_binding_middleware()
-    studio_session(platform="cli")
-    created = create({"prompt": "CLI", "schedule": "30m", "name": "cli"})
-    import model_tools
-    return {"created": created, "job": job_view(created["job_id"]), "bindings": bindings(),
-            "legacy_alias": getattr(model_tools, "_LEGACY_TOOL_ALIASES", {}).get("cronjob")}
-
-
-def case_cron_binding_failure():
-    blocker = os.path.join(os.environ["HOME"], "not-a-directory")
-    with open(blocker, "w", encoding="utf-8") as handle:
-        handle.write("x")
-    os.environ[sn.STUDIO_CONFIG_ENV] = json.dumps({"bindings_db": os.path.join(blocker, "b.db"), "instance_id": "inst-1"})
-    assert sn.install_cron_binding_middleware()
-    studio_session()
-    created = create({"prompt": "Fail closed", "schedule": "30m", "name": "binding-failure"})
-    from cron.jobs import load_jobs
-    jobs = [job for job in load_jobs() if job.get("name") == "binding-failure"]
-    return {"created": created, "job": job_view(jobs[0]["id"]) if jobs else None}
+    pool.get_or_create("sess-fresh", profile=None)
+    after = registry.get_entry("cronjob_manage")
+    return {"same_entry": after is entry, "same_handler": after.handler is before[0], "same_check": after.check_fn is before[1],
+            "wrapped": hasattr(after.handler, "__wrapped__") or hasattr(after.check_fn, "__wrapped__"),
+            "has_installer": hasattr(sn, "install_cron_binding_middleware")}
 
 
 def _pool():
@@ -278,7 +180,6 @@ def _scheduled_executions(job_id, count):
 
 def case_observe_pagination():
     """More than one native page of retained executions recovers exactly once, in bounded passes."""
-    assert sn.install_cron_binding_middleware()
     studio_session()
     created = create({"prompt": "Backlog", "schedule": "30m", "name": "backlog"})
     job_id = created["job_id"]

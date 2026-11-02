@@ -7,7 +7,7 @@
 // result and terminal completions land only in session A. Every child is stopped in finally.
 //
 //   npm run build && HERMES_AGENT_ROOT=<read-only hermes checkout> node tests/server/fixtures/session-notifications-e2e.mjs
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, createWriteStream, existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -192,6 +192,7 @@ let token = ''
 const studioEnv = () => baseEnv({
   NODE_ENV: 'production',
   PORT: String(port),
+  BIND_HOST: '127.0.0.1',
   HERMES_WEB_UI_HOME: dirs.studio,
   HERMES_WEBUI_STATE_DIR: dirs.studio,
   UPLOAD_DIR: dirs.uploads,
@@ -317,6 +318,21 @@ function studioRows(sql, ...params) {
   try { return db.prepare(sql).all(...params) } finally { db.close() }
 }
 
+/**
+ * A native job created with the checkout's own CLI, then bound to the session explicitly through
+ * Studio's binding API. Nothing wraps or patches Hermes' cron tool.
+ */
+function cliCreate(name, schedule, extra = []) {
+  const result = spawnSync(join(dirs.bin, 'hermes'), ['cron', 'create', '--name', name, ...extra, schedule], { cwd: repo, env: baseEnv(), encoding: 'utf8' })
+  return /Created job: (\S+)/.exec(String(result.stdout).replace(/\u001b\[[0-9;]*m/g, ''))?.[1] || null
+}
+async function bindJob(sessionId, jobId) {
+  const detail = await api(`/api/studio/sessions/${sessionId}?profile=default`)
+  return api('/api/hermes/cron/session-bindings', { method: 'POST', body: JSON.stringify({ profile: 'default', session_id: sessionId,
+    expected_session_generation: detail.json?.session?.session_generation, job_id: jobId }) })
+}
+const inMinutes = () => new Date(Date.now() + 75_000).toISOString()
+
 async function main() {
   await new Promise(done => modelServer.listen(0, '127.0.0.1', done))
   const modelPort = modelServer.address().port
@@ -373,21 +389,23 @@ async function main() {
 
   // Session B exists and is the focused one.
   await runTurn(owner, ownerEvents, B, 'hello from B')
-  // Chat-created cron job in A (omitted delivery).
-  await runTurn(owner, ownerEvents, A, 'E2E_SCHEDULE please brief me')
-  const created = jobs().find(job => job.name === 'e2e-brief')
-  const bound = bindings().find(row => row.job_id === created?.id)
-  record('normal chat create (no exec-ask override) binds exact session and generation before activation',
-    Boolean(created && bound?.session_id === A && bound?.session_generation && created.deliver === 'local' && created.enabled !== false && !created.origin),
-    { deliver: created?.deliver, enabled: created?.enabled, bound })
-  await runTurn(owner, ownerEvents, A, 'E2E_SCHEDULE_SCRIPT run the status script')
-  const scriptJob = jobs().find(job => job.name === 'e2e-script')
-  record('script-only job created and bound', Boolean(scriptJob && scriptJob.no_agent && bindings().some(row => row.job_id === scriptJob.id)))
-  // Explicit target untouched and unbound.
-  await runTurn(owner, ownerEvents, A, 'E2E_SCHEDULE_SLACK post it')
-  const slack = jobs().find(job => job.name === 'e2e-slack')
-  record('explicit delivery target unchanged and not bound', Boolean(slack && slack.deliver === 'slack:C123' && !bindings().some(row => row.job_id === slack.id)),
-    { deliver: slack?.deliver })
+  // Native agent-backed job in A, bound explicitly (the Agent Bridge no longer wraps cronjob_manage).
+  await runTurn(owner, ownerEvents, A, 'E2E_PLAIN open A')
+  const briefId = cliCreate('e2e-brief', inMinutes(), ['--deliver', 'local', 'E2E_CRON_PROMPT report the brief'])
+  const briefBind = await bindJob(A, briefId)
+  const created = jobs().find(job => job.id === briefId)
+  const bound = bindings().find(row => row.job_id === briefId)
+  record('explicit binding records the exact session and generation for a native local job',
+    briefBind.status === 201 && Boolean(created && bound?.session_id === A && bound?.session_generation && created.deliver === 'local'),
+    { status: briefBind.status, deliver: created?.deliver, bound })
+  const scriptId = cliCreate('e2e-script', inMinutes(), ['--deliver', 'local', '--no-agent', '--script', 'e2e_status.py'])
+  const scriptBind = await bindJob(A, scriptId)
+  record('script-only job is refused by the agent-cron binding (use a script report)', scriptBind.json?.error === 'script_job_requires_script_report'
+    && !bindings().some(row => row.job_id === scriptId), { status: scriptBind.status })
+  const slackId = cliCreate('e2e-slack', inMinutes(), ['--deliver', 'slack:C123', 'E2E_CRON_PROMPT slack'])
+  const slackBind = await bindJob(A, slackId)
+  record('explicit delivery target unchanged and never bound', slackBind.json?.error === 'explicit_delivery_target'
+    && jobs().find(job => job.id === slackId)?.deliver === 'slack:C123' && !bindings().some(row => row.job_id === slackId))
   owner.disconnect()
 
   // The user now focuses only session B.
@@ -421,11 +439,6 @@ async function main() {
   record('R8 durable attention after delivery (fresh snapshot)', unreadAfter?.unread === true && unreadAfter.lastAttentionId > unreadAfter.readAttentionId,
     { lastAttentionId: unreadAfter?.lastAttentionId, readAttentionId: unreadAfter?.readAttentionId })
   record('R8 acknowledgement persists across reconnect', await ackRead(A) === true && (await unreadOf(A))?.unread === false)
-  const scriptNotice = await waitFor(() => noticeFor('e2e-script'), 180_000, 'script notice for A')
-  const scriptView = scriptNotice.payload.message?.studio_notice || {}
-  record('script-only fire is a truthful status-only notice (no output claimed)', scriptView.disposition === 'status_only'
-    && scriptView.reason === 'output_unavailable_for_runtime' && !String(scriptNotice.payload.message?.content || '').includes('SCRIPT_RAW_OUTPUT'),
-    { disposition: scriptView.disposition, reason: scriptView.reason, execution_id: scriptView.execution_id })
   await delay(3000)
   const afterFire = modelRequests.slice(beforeFire)
   record('passive cron result starts no LLM turn in A', afterFire.every(r => textOf(r.messages.map(m => textOf(m.content)).join('\n')).includes('E2E_CRON_PROMPT')),
@@ -500,22 +513,6 @@ async function main() {
   const processRows = studioRows("SELECT disposition, count(*) AS n FROM session_notifications WHERE kind='process_completion' GROUP BY disposition")
   record('process completion dispositions recorded', processRows.some(row => row.disposition === 'dispatched'), { processRows })
 
-  // Chat-manual `cronjob_manage run`: its own async-delegation result is the only delivery.
-  await runTurn(actor, actorEvents, A, 'E2E_SCHEDULE_MANUAL every day')
-  const manualJob = jobs().find(job => job.name === 'e2e-manual')
-  const delegationTurns = () => modelRequests.filter(r => {
-    const lastUser = [...r.messages].reverse().find(m => m.role === 'user')
-    return r.decision?.text === 'DELEGATION_ACK' && textOf(lastUser?.content).startsWith('[ASYNC DELEGATION COMPLETE')
-  })
-  const manualNoticeEvents = () => actorEvents.filter(e => e.event === 'session.notice' && e.payload?.message?.studio_notice?.job_name === 'e2e-manual')
-  await runTurn(actor, actorEvents, A, `E2E_RUN_NOW job=${manualJob?.id}`)
-  await waitFor(() => delegationTurns().length >= 1, 240_000, 'manual run delegation result')
-  await delay(40_000)
-  const manualRows = studioRows("SELECT disposition FROM session_notifications WHERE producer_key LIKE ?", `cron:${manualJob?.id}:%`)
-  record('chat-manual run returns exactly once through its async-delegation turn, no cron notice duplicate',
-    Boolean(manualJob) && delegationTurns().length === 1 && manualRows.length === 0 && manualNoticeEvents().length === 0,
-    { delegation_turns: delegationTurns().length, notice_rows: manualRows.length })
-
   // R2/R4: reset the conversation while a notifying process is still running.
   const resetStart = machineTurns().length
   await runTurn(actor, actorEvents, A, 'E2E_TERMINAL_RESET run then reset')
@@ -575,7 +572,8 @@ async function main() {
   const watcherEvents = collect(watcher)
   await waitFor(() => watcher.connected, 20_000, 'off-focus admin socket')
   const staleSince = bobViewerEvents.length
-  await runTurn(actor, actorEvents, S, 'E2E_SCHEDULE recreated under default')
+  await runTurn(actor, actorEvents, S, 'E2E_PLAIN recreated under default')
+  await bindJob(S, cliCreate('e2e-recreated', inMinutes(), ['--deliver', 'local', 'E2E_CRON_PROMPT recreated']))
   const recreated = studioRows('SELECT profile FROM sessions WHERE id=?', S)
   await waitFor(() => watcherEvents.find(e => e.event === 'session.notice' && e.payload?.session_id === S), 300_000, 'recreated-session notice')
   await delay(3000)

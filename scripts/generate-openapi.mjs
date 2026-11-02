@@ -53,6 +53,7 @@ const tagMappings = {
   'modules/hermes/routes/plugins.ts': { name: 'Plugins', description: 'Plugin browsing and management' },
   'modules/hermes/routes/memory.ts': { name: 'Memory', description: 'Agent memory files' },
   'modules/hermes/routes/jobs.ts': { name: 'Jobs', description: 'Scheduled job management' },
+  'modules/hermes/routes/cron-session-bindings.ts': { name: 'Jobs', description: 'Explicit cron job to session bindings' },
   'modules/hermes/routes/cron-history.ts': { name: 'Jobs', description: 'Cron job history' },
   'modules/hermes/routes/kanban.ts': { name: 'Kanban', description: 'Kanban board and task management' },
   'modules/hermes/routes/weixin.ts': { name: 'Weixin', description: 'Hermes WeChat QR code login' },
