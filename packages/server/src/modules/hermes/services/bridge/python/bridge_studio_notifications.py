@@ -1,11 +1,8 @@
 """Studio-owned session notifications for Hermes cron results and terminal completions.
 
-Cron: a ``cronjob_manage`` create made from a Studio Agent Bridge session has no
-capturable Hermes origin (no chat id), so Hermes stores ``deliver=local``. When the
-request asks for the creating conversation (``deliver`` omitted or ``origin``), the
-job is created paused, a durable Studio binding is written, and only then is the job
-resumed through the native tool action. Explicit targets are passed through
-untouched and never bound.
+Cron: Studio binds a native job to a session only through its explicit binding API. This
+module never wraps or replaces a registered Hermes tool, its availability check or any
+cached tool definition.
 
 Observation reads the native execution ledger and the canonical admission result of
 each fire (``cron_request_id(job, execution_id)``); it never correlates output files
@@ -20,53 +17,16 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 import uuid
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-STUDIO_CONFIG_ENV = "HERMES_AGENT_BRIDGE_STUDIO_NOTIFICATIONS"
-CRON_TOOL_NAME = "cronjob_manage"
-_WRAPPER_MARKER = "_studio_session_binding_wrapper"
-_PAUSED_SENTENCE = "Created PAUSED — resume to schedule, or explicitly run now."
 _TERMINAL_EXECUTION_STATES = {"completed", "failed", "unknown"}
 _OBSERVE_PAGE = 50
-_install_lock = threading.Lock()
 
 
-def studio_config() -> dict[str, str] | None:
-    raw = os.environ.get(STUDIO_CONFIG_ENV, "")
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    bindings_db = str(parsed.get("bindings_db") or "").strip()
-    instance_id = str(parsed.get("instance_id") or "").strip()
-    if not bindings_db or not instance_id:
-        return None
-    return {"bindings_db": bindings_db, "instance_id": instance_id}
-
-
-# --- binding store -------------------------------------------------------------------------------
-
-_SCHEMA = """CREATE TABLE IF NOT EXISTS cron_session_bindings (
-  instance_id TEXT NOT NULL,
-  profile TEXT NOT NULL,
-  job_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  bound_at REAL NOT NULL,
-  requested_deliver TEXT,
-  stored_deliver TEXT,
-  requested_paused INTEGER NOT NULL DEFAULT 0,
-  session_generation TEXT,
-  PRIMARY KEY (instance_id, profile, job_id)
-)"""
+# --- owner session generations -------------------------------------------------------------------
 
 # Owner session generations declared by Studio with each bridge turn, in declaration order
 # (session id -> [(declared_at, generation or None)]). A producer started during a turn belongs to
@@ -103,205 +63,6 @@ def generation_at(session_id: str, started_at: Any) -> str | None:
     with _generation_lock:
         declared = [generation for at, generation in _session_generations.get(session_id) or [] if at <= moment]
     return declared[-1] if declared else None
-
-
-def _connect(path: str) -> sqlite3.Connection:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=FULL")
-    conn.execute(_SCHEMA)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(cron_session_bindings)")}
-    if "session_generation" not in columns:
-        conn.execute("ALTER TABLE cron_session_bindings ADD COLUMN session_generation TEXT")
-    return conn
-
-
-def write_binding(config: dict[str, str], *, profile: str, job_id: str, session_id: str,
-                  requested_deliver: str | None, stored_deliver: str | None, requested_paused: bool,
-                  generation: str | None) -> float:
-    if not generation:
-        raise RuntimeError("the owner session generation is unknown for this turn")
-    bound_at = time.time()
-    conn = _connect(config["bindings_db"])
-    try:
-        with conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO cron_session_bindings (instance_id, profile, job_id, session_id, bound_at,"
-                " requested_deliver, stored_deliver, requested_paused, session_generation)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (config["instance_id"], profile, job_id, session_id, bound_at, requested_deliver,
-                 stored_deliver, 1 if requested_paused else 0, generation),
-            )
-    finally:
-        conn.close()
-    return bound_at
-
-
-# --- cron create middleware ----------------------------------------------------------------------
-
-def _clean_targets(value: Any) -> list[str]:
-    if value is None:
-        return []
-    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
-    return [str(item).strip() for item in items if str(item).strip()]
-
-
-def translate_deliver(value: Any) -> tuple[bool, str | None]:
-    """``(binds_session, native_deliver)`` for a Studio create.
-
-    Omitted delivery and ``origin`` both mean "this conversation": bind the Studio session
-    and store a native value that never falls back to a home channel. Any explicit target
-    is preserved verbatim and is not bound (no additive Studio mirror).
-    """
-    targets = _clean_targets(value)
-    if not targets:
-        return True, "local"
-    remaining = [target for target in targets if target.lower() != "origin"]
-    if len(remaining) == len(targets):
-        return False, None
-    return True, ",".join(dict.fromkeys(remaining)) or "local"
-
-
-def _studio_session_context() -> dict[str, str] | None:
-    try:
-        from gateway.session_context import get_session_env
-    except Exception:
-        return None
-    if get_session_env("HERMES_SESSION_PLATFORM", "") != "agent_bridge":
-        return None
-    if str(get_session_env("HERMES_CRON_SESSION", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        return None
-    try:
-        from agent.delegation_context import is_delegated_child_context
-        if is_delegated_child_context():
-            return None
-    except Exception:
-        pass
-    session_id = (get_session_env("HERMES_UI_SESSION_ID", "") or get_session_env("HERMES_SESSION_KEY", "")).strip()
-    if not session_id:
-        return None
-    profile = (get_session_env("HERMES_SESSION_PROFILE", "") or "default").strip() or "default"
-    return {"session_id": session_id, "profile": profile}
-
-
-def _loads(result: Any) -> dict[str, Any] | None:
-    if isinstance(result, dict):
-        return dict(result)
-    try:
-        parsed = json.loads(result)
-    except (TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _strip_sentence(message: Any, sentence: str | None) -> Any:
-    if not isinstance(message, str) or not sentence:
-        return message
-    return " ".join(message.replace(sentence, " ").split())
-
-
-def _bound_create(original: Callable[..., Any], config: dict[str, str], context: dict[str, str],
-                  args: dict[str, Any], kwargs: dict[str, Any]) -> Any:
-    binds, native_deliver = translate_deliver(args.get("deliver"))
-    if not binds:
-        return original(args, **kwargs)
-    requested_paused = bool(args.get("paused", False))
-    # failure_deliver is the user's explicit choice and is passed to the native tool unchanged.
-    create_args = dict(args, paused=True, deliver=native_deliver)
-    created_raw = original(create_args, **kwargs)
-    created = _loads(created_raw)
-    if not created or created.get("success") is not True or not created.get("job_id"):
-        return created_raw
-    job_id = str(created["job_id"])
-    try:
-        write_binding(config, profile=context["profile"], job_id=job_id, session_id=context["session_id"],
-                      requested_deliver=None if args.get("deliver") is None else ",".join(_clean_targets(args.get("deliver"))),
-                      stored_deliver=str(created.get("deliver") or native_deliver), requested_paused=requested_paused,
-                      generation=session_generation(context["session_id"]))
-    except Exception as exc:
-        created["success"] = False
-        created["error"] = (f"Studio session binding failed; job {job_id} was left paused and will not run "
-                            f"until resumed: {type(exc).__name__}: {exc}")
-        return json.dumps(created, ensure_ascii=False)
-    created["studio_session_delivery"] = "bound"
-    if requested_paused:
-        return json.dumps(created, ensure_ascii=False)
-    resumed = _loads(original({"action": "resume", "job_id": job_id}, **kwargs))
-    if not resumed or resumed.get("success") is not True:
-        created["success"] = False
-        created["error"] = (f"Studio session binding was saved but resuming job {job_id} failed; "
-                            f"the job is still paused: {(resumed or {}).get('error') or 'unknown error'}")
-        return json.dumps(created, ensure_ascii=False)
-    job_view = resumed.get("job") if isinstance(resumed.get("job"), dict) else None
-    if job_view is not None:
-        created["job"] = job_view
-        if "next_run_at" in job_view:
-            created["next_run_at"] = job_view.get("next_run_at")
-    created["message"] = _strip_sentence(created.get("message"), _PAUSED_SENTENCE)
-    created["message"] = " ".join(filter(None, (
-        created.get("message"),
-        "Results will appear in this Studio conversation as a notification when it runs.",
-    )))
-    return json.dumps(created, ensure_ascii=False)
-
-
-def install_cron_binding_middleware() -> bool:
-    """Wrap the registered ``cronjob_manage`` handler once (idempotent).
-
-    The legacy ``cronjob`` name resolves to the same registry entry before dispatch.
-    Calls outside a Studio Agent Bridge session pass straight through.
-    """
-    config = studio_config()
-    if config is None:
-        return False
-    try:
-        from tools.registry import registry
-    except Exception:
-        return False
-    with _install_lock:
-        entry = registry.get_entry(CRON_TOOL_NAME)
-        if entry is None:
-            return False
-        if getattr(entry.handler, _WRAPPER_MARKER, False):
-            return True
-        original = entry.handler
-
-        def studio_cronjob_handler(args, **kwargs):
-            context = _studio_session_context()
-            current = studio_config()
-            if (context is None or current is None or not isinstance(args, dict)
-                    or str(args.get("action") or "").strip().lower() != "create"):
-                return original(args, **kwargs)
-            return _bound_create(original, current, context, args, kwargs)
-
-        setattr(studio_cronjob_handler, _WRAPPER_MARKER, True)
-        studio_cronjob_handler.__wrapped__ = original  # type: ignore[attr-defined]
-        entry.handler = studio_cronjob_handler
-
-        # Hermes offers cronjob_manage only to interactive surfaces (its check reads HERMES_EXEC_ASK et al.)
-        # and caches both the verdict and the resulting tool definitions process-wide, so a resolution made
-        # outside a Studio run (e.g. its post-turn background review) would hide the tool from every later
-        # session. A Studio bridge worker serves the interactive Web UI: make that a property of the
-        # worker, then drop availability resolved before this point.
-        original_check = entry.check_fn
-
-        def studio_cronjob_available() -> bool:
-            return True
-
-        studio_cronjob_available.__wrapped__ = original_check  # type: ignore[attr-defined]
-        entry.check_fn = studio_cronjob_available
-        try:
-            from tools.registry import invalidate_check_fn_cache
-            invalidate_check_fn_cache()
-        except Exception:
-            pass
-        try:
-            import model_tools
-            model_tools._clear_tool_defs_cache()
-        except Exception:
-            pass
-        return True
 
 
 # --- cron observation ----------------------------------------------------------------------------
