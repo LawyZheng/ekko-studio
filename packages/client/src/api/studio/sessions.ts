@@ -148,7 +148,23 @@ export interface ExternalStudioNoticeView {
   url: string | null
 }
 
-export type StudioNoticeView = CronStudioNoticeView | ExternalStudioNoticeView
+/** One invocation of an enrolled script wrapper; not a native Hermes execution receipt. */
+export interface ScriptReportStudioNoticeView {
+  kind: 'script_report'
+  notification_id: number
+  disposition: string
+  identity_kind: 'wrapper_invocation'
+  job_id: string
+  job_name: string
+  invocation_id: string
+  outcome: string
+  exit_code: number | null
+  signal: number | null
+  reason: string | null
+  truncated: boolean
+}
+
+export type StudioNoticeView = CronStudioNoticeView | ExternalStudioNoticeView | ScriptReportStudioNoticeView
 
 export interface CronStudioNoticeView {
   kind: 'cron'

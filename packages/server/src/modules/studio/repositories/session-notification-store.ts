@@ -4,10 +4,10 @@ import { getDb } from '../infrastructure/database'
 import { initSessionStateTables } from '../infrastructure/database/session-state-schema'
 import { getSessionGeneration } from './session-store'
 
-export type SessionNotificationKind = 'cron' | 'process_completion' | 'external'
+export type SessionNotificationKind = 'cron' | 'process_completion' | 'external' | 'script_report'
 
 /** Kinds shown in the timeline and projected once into the next intentional question. */
-const PASSIVE_NOTICE_KINDS = "kind IN ('cron','external')"
+const PASSIVE_NOTICE_KINDS = "kind IN ('cron','external','script_report')"
 
 /**
  * Terminal disposition of one producer event.
@@ -156,6 +156,8 @@ export function acceptFencedSessionNotification(input: {
   expectedGeneration: string
   kind: SessionNotificationKind
   payload: Record<string, unknown>
+  /** Recorded disposition (default `notified`); only `notified`, `status_only` and `unknown` are shown. */
+  disposition?: SessionNotificationDisposition
   now?: number
 }): FencedAcceptance {
   const now = input.now ?? Date.now()
@@ -173,16 +175,22 @@ export function acceptFencedSessionNotification(input: {
     if (existing) {
       db.exec('COMMIT')
       const record = rowToRecord(existing)
-      return JSON.stringify(record.payload) === JSON.stringify(input.payload) ? { status: 'duplicate', record } : { status: 'conflict' }
+      return record.disposition === (input.disposition ?? 'notified') && JSON.stringify(record.payload) === JSON.stringify(input.payload)
+        ? { status: 'duplicate', record } : { status: 'conflict' }
     }
+    const disposition = input.disposition ?? 'notified'
+    // A silent outcome is recorded without unread attention and is never shown.
+    const attention = disposition !== 'silent'
     const result = db.prepare(`INSERT INTO session_notifications
         (namespace, profile, producer_key, session_id, session_generation, kind, disposition, payload,
          attention_pending, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'notified', ?, 1, ?, ?)`).run(input.namespace, input.profile, input.producerKey,
-      input.sessionId, input.expectedGeneration, input.kind, JSON.stringify(input.payload), now, now)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(input.namespace, input.profile, input.producerKey,
+      input.sessionId, input.expectedGeneration, input.kind, disposition, JSON.stringify(input.payload), attention ? 1 : 0, now, now)
     const id = Number(result.lastInsertRowid)
-    db.prepare('INSERT INTO session_attention_events(session_id, event_key) VALUES (?, ?)')
-      .run(input.sessionId, `${NOTICE_ATTENTION_PREFIX}${id}`)
+    if (attention) {
+      db.prepare('INSERT INTO session_attention_events(session_id, event_key) VALUES (?, ?)')
+        .run(input.sessionId, `${NOTICE_ATTENTION_PREFIX}${id}`)
+    }
     db.exec('COMMIT')
     return { status: 'accepted', record: getSessionNotificationById(id)! }
   } catch (error) {
