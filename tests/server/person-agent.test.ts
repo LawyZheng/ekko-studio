@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PERSON_BOTS } from '../../packages/shared/person-bots'
@@ -27,7 +27,7 @@ let installedAgent = true
 let allowedProfiles: string[] = ['default']
 
 beforeEach(async () => {
-  vi.resetModules(); db = new DatabaseSync(':memory:'); dir = mkdtempSync(join(tmpdir(), 'person-test-')); activeAccount = true
+  vi.resetModules(); db = new DatabaseSync(':memory:'); dir = realpathSync(mkdtempSync(join(tmpdir(), 'person-test-'))); activeAccount = true
   modelContextLength = 16000; globalCompression = {}
   vi.doMock('../../packages/server/src/modules/studio/public/provider-runtime', () => ({ getModelContextLength: ({ model }: { model: string }) => model === 'm2' ? 128000 : modelContextLength }))
   installedAgent = true; allowedProfiles = ['default']; mainBusy = false; clearHistoryMock.mockClear(); disposeSessionMock.mockClear()
@@ -40,14 +40,14 @@ beforeEach(async () => {
     listUserProfiles: () => allowedProfiles.map(profile_name => ({ profile_name })), userCanAccessProfile: (_id: number, p: string) => allowedProfiles.includes(p),
   }))
   vi.doMock('../../packages/server/src/modules/studio/public/profile-config', () => ({ listProfileNamesFromDisk: () => ['default'], getActiveProfileName: () => 'default', readConfigYamlForProfile: async () => ({ compression: globalCompression }) }))
-  vi.doMock('../../packages/server/src/modules/studio/public/agent-status-registry', () => ({ getAgentAvailabilitySnapshot: () => ({ agents: [{ id: 'hermes', installed: true }, { id: 'ekko-agent', installed: installedAgent }, { id: 'codex', installed: true }, { id: 'pi', installed: false }] }) }))
+  vi.doMock('../../packages/server/src/modules/studio/public/agent-status-registry', () => ({ getAgentAvailabilitySnapshot: () => ({ agents: [{ id: 'hermes', installed: true }, { id: 'ekko-agent', installed: installedAgent }, { id: 'codex', installed: true }, { id: 'claude-code', installed: true }, { id: 'pi', installed: false }] }) }))
   catalog = [{ provider: 'test', models: ['m'], api_mode: 'chat_completions' }]
   vi.doMock('../../packages/server/src/modules/studio/public/session-agent-runtime', () => ({ getSessionAvailableModelGroups: async () => catalog, validateCodingAgentModelEffort: vi.fn(async () => {}) }))
   vi.doMock('../../packages/server/src/modules/studio/services/usage/usage-recorder', () => ({ recordSessionUsage: vi.fn() }))
   const { initAllHermesTables } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
   initAllHermesTables()
   const { createSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
-  for (const owner of [1, 2]) createSession({ id: `person-main-${owner}`, studio_user_id: owner, user_id: owner, title: `Conversation ${owner}`, source: 'builtin_agent', agent: 'ekko-agent', agent_preset: 'person', profile: 'default' })
+  for (const owner of [1, 2]) createSession({ id: `person-main-${owner}`, studio_user_id: owner, user_id: owner, title: `Conversation ${owner}`, workspace: dir, source: 'builtin_agent', agent: 'ekko-agent', agent_preset: 'person', profile: 'default' })
   store = await import('../../packages/server/src/modules/studio/repositories/person-store')
   tasks = await import('../../packages/server/src/modules/studio/services/person/tasks')
   schedules = await import('../../packages/server/src/modules/studio/services/person/schedules')
@@ -235,6 +235,116 @@ describe('Person task result memory requests', () => {
 })
 const wait = async (id: string, state: string) => vi.waitFor(() => expect(store.getPersonExecution(1, id).state).toBe(state), { timeout: 2000, interval: 10 })
 
+describe('Person task run time limits', () => {
+  it('defaults legacy and new accounts to 60 minutes without mutating stored settings', () => {
+    const legacy = store.personSettings(1)
+    const { taskTimeoutMinutes: _omitted, ...settings } = legacy.settings
+    const raw = JSON.stringify(settings)
+    db.prepare('UPDATE person_accounts SET settings_json=? WHERE user_id=1').run(raw)
+    expect(store.personSettings(1).settings.taskTimeoutMinutes).toBe(60)
+    expect(store.personSettings(2).settings.taskTimeoutMinutes).toBe(60)
+    expect(db.prepare('SELECT settings_json FROM person_accounts WHERE user_id=1').get()?.settings_json).toBe(raw)
+  })
+
+  it.each([1, 120, 35_791, -1])('persists %i minutes across Bots, isolates accounts and uses it for dispatch', async minutes => {
+    const { configurePerson, personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
+    const { createSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
+    createSession({ id: 'person-main-timeout', studio_user_id: 1, user_id: 1, title: 'Second Bot', source: 'builtin_agent', agent: 'ekko-agent', agent_preset: 'person', profile: 'default' })
+    const first = await create()
+    await configurePerson(1, { session_id: 'person-main-1', taskTimeoutMinutes: minutes, expected_revision: 1 })
+    expect(JSON.parse(String(db.prepare('SELECT settings_json FROM person_accounts WHERE user_id=1').get()!.settings_json)).taskTimeoutMinutes).toBe(minutes)
+    expect((await personSnapshot(1, 'person-main-timeout')).settings.taskTimeoutMinutes).toBe(minutes)
+    expect(store.personSettings(2).settings.taskTimeoutMinutes).toBe(60)
+    await runner.tickPersonWork()
+    await wait(first.execution.id, 'finished')
+    expect(runtime.execute).toHaveBeenLastCalledWith(expect.objectContaining({ taskTimeoutMinutes: minutes }))
+    await configurePerson(1, { taskTimeoutMinutes: 5, expected_revision: 2 })
+    const next = await create()
+    await runner.tickPersonWork()
+    await wait(next.execution.id, 'finished')
+    expect(runtime.execute).toHaveBeenLastCalledWith(expect.objectContaining({ taskTimeoutMinutes: 5 }))
+    await expect(configurePerson(1, { taskTimeoutMinutes: -1, expected_revision: 2 })).rejects.toMatchObject({ status: 409 })
+    expect(store.personSettings(1).settings.taskTimeoutMinutes).toBe(5)
+  })
+
+  it.each([0, -2, 1.5, '60', null, true, NaN, Infinity, 35_792, Number.MAX_SAFE_INTEGER])('rejects invalid timeout %s without saving', async taskTimeoutMinutes => {
+    const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+    const original = store.personSettings(1)
+    await expect(configurePerson(1, { taskTimeoutMinutes, expected_revision: original.revision })).rejects.toMatchObject({ status: 400 })
+    expect(store.personSettings(1)).toEqual(original)
+  })
+
+  it('keeps the running limit and applies changes to the next dispatch', async () => {
+    const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+    let finish!: (result: { ok: boolean; output: string }) => void
+    runtime.execute = vi.fn(input => {
+      input.onEvent('run.started', {})
+      return new Promise(resolve => { finish = resolve })
+    })
+    const first = await create()
+    await runner.tickPersonWork()
+    await wait(first.execution.id, 'running')
+    await configurePerson(1, { taskTimeoutMinutes: -1, expected_revision: 1 })
+    expect(runtime.execute).toHaveBeenLastCalledWith(expect.objectContaining({ taskTimeoutMinutes: 60 }))
+    finish({ ok: true, output: 'Done' })
+    await wait(first.execution.id, 'finished')
+    const next = await create()
+    await runner.tickPersonWork()
+    await wait(next.execution.id, 'running')
+    expect(runtime.execute).toHaveBeenLastCalledWith(expect.objectContaining({ taskTimeoutMinutes: -1 }))
+    finish({ ok: true, output: 'Done' })
+    await wait(next.execution.id, 'finished')
+  })
+
+  it('treats the timeout as shared when another Bot is replying', async () => {
+    const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+    const { createSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
+    createSession({ id: 'person-main-busy', studio_user_id: 1, user_id: 1, title: 'Busy Bot', source: 'builtin_agent', agent: 'ekko-agent', agent_preset: 'person', profile: 'default' })
+    mainBusy = 'person-main-busy'
+    const original = store.personSettings(1)
+    await expect(configurePerson(1, { session_id: 'person-main-1', taskTimeoutMinutes: -1, expected_revision: original.revision })).rejects.toMatchObject({ status: 409 })
+    expect(store.personSettings(1)).toEqual(original)
+  })
+})
+
+describe('Person account concurrency', () => {
+  it.each([6, 12])('shares %i slots across Bots and starts queued work when a slot is released', async limit => {
+    const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+    const { createSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
+    expect(store.personSettings(1).settings.maxConcurrentTasks).toBe(6)
+    expect(store.personSettings(2).settings.maxConcurrentTasks).toBe(6)
+    if (limit === 12) await configurePerson(1, { maxConcurrentTasks: limit, expected_revision: 1 })
+    createSession({ id: 'person-main-second', studio_user_id: 1, user_id: 1, title: 'Second Bot', source: 'builtin_agent', agent: 'ekko-agent', agent_preset: 'person', bot_type: 'xiaohe', profile: 'default' })
+    expect(store.personSettings(1, 'person-main-second').settings.maxConcurrentTasks).toBe(limit)
+    expect(store.personSettings(2).settings.maxConcurrentTasks).toBe(6)
+
+    const finish = new Map<string, (result: { ok: boolean; output?: string; error?: string }) => void>()
+    runtime.execute = vi.fn(input => {
+      input.onEvent('run.started', {})
+      return new Promise<{ ok: boolean; output?: string; error?: string }>(resolve => {
+        finish.set(input.sessionId, resolve)
+        input.signal.addEventListener('abort', () => resolve({ ok: false, error: 'Stopped' }), { once: true })
+      })
+    })
+    const created = []
+    for (let index = 0; index < 13; index++) created.push(await create({ session_id: index % 2 ? 'person-main-second' : 'person-main-1' }))
+    const executions = () => created.map(({ execution }) => store.getPersonExecution(1, execution.id))
+    await runner.tickPersonWork()
+    await vi.waitFor(() => expect(runtime.execute).toHaveBeenCalledTimes(limit))
+    expect(executions().filter(run => run.state === 'running')).toHaveLength(limit)
+    expect(executions().filter(run => run.state === 'queued')).toHaveLength(13 - limit)
+    expect(new Set(created.filter(({ execution }) => store.getPersonExecution(1, execution.id).state === 'running').map(({ task }) => task.session_id))).toEqual(new Set(['person-main-1', 'person-main-second']))
+
+    const completed = executions().find(run => run.state === 'running')!
+    finish.get(completed.session_id)!({ ok: true, output: 'Done' })
+    await wait(completed.id, 'finished')
+    await runner.tickPersonWork()
+    await vi.waitFor(() => expect(runtime.execute).toHaveBeenCalledTimes(limit + 1))
+    expect(executions().filter(run => run.state === 'running')).toHaveLength(limit)
+    expect(executions().filter(run => run.state === 'queued')).toHaveLength(12 - limit)
+  })
+})
+
 describe('Person session model isolation', () => {
   it.each([{ model: selection }, { reasoning_effort: 'high' }, { use_global_default: true }])('rejects model settings without a session: %j', async patch => {
     const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
@@ -271,7 +381,7 @@ describe('Person session model isolation', () => {
     const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
     const { configurePerson, personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
     const { createPersonChatAgent } = await import('../../packages/server/src/modules/studio/services/person/chat-agent')
-    const second = await createPersonConversation(1, 'Second')
+    const second = await createPersonConversation(1, 'Second', { workspace: dir })
     catalog[0].models.push('m2')
     catalog[0].model_meta = { m: { reasoning_efforts: ['low', 'high'] }, m2: { reasoning_efforts: ['low', 'high'] } }
     runtime.chatAgent = vi.fn(() => ({ run: vi.fn(), dispose: vi.fn() } as any))
@@ -440,7 +550,7 @@ describe('Person account-owned tasks and runtime', () => {
     expect(await personSnapshot(1, 'person-main-1')).toMatchObject({ compression: { enabled: false, threshold: 0.7 }, settings: { compressionThreshold: null } })
   })
 
-  it.each([{ compressionThreshold: 0.01 }, { compressionThreshold: 0.96 }, { compressionThreshold: '50' }, { contextTokens: 16000 }, { maxSteps: 31 }, { maxConcurrentTasks: 5 }])('rejects invalid general settings without saving: %j', async patch => {
+  it.each([{ compressionThreshold: 0.01 }, { compressionThreshold: 0.96 }, { compressionThreshold: '50' }, { contextTokens: 16000 }, { maxSteps: 31 }, { maxConcurrentTasks: 0 }, { maxConcurrentTasks: 13 }, { maxConcurrentTasks: 1.5 }])('rejects invalid general settings without saving: %j', async patch => {
     const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
     const original = store.personSettings(1)
     await expect(configurePerson(1, { ...patch, expected_revision: original.revision })).rejects.toMatchObject({ status: 400 })
@@ -1285,15 +1395,15 @@ it('queries the same 100-task window as single chat with account-scoped search, 
 })
 
 
-it('uses the complete native memory toolset within the minimum Person budget', async () => {
+it('uses the complete native memory toolset within a 10k Person model budget', async () => {
   const { createPersonAgent } = await import('../../packages/server/src/bootstrap/person-chat-agent')
   const { createPersonChatAgent } = await import('../../packages/server/src/modules/studio/services/person/chat-agent')
   const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
   const { personMemory } = await import('../../packages/server/src/modules/studio/services/person/memory')
   const { countTextTokens } = await import('../../packages/ekko-agent/src/model/tokens')
   runtime.chatAgent = createPersonAgent
-  modelContextLength = 8000
-  const conversation = await createPersonConversation(1, '旅行计划'.repeat(25))
+  modelContextLength = 10000
+  const conversation = await createPersonConversation(1, '旅行计划'.repeat(25), { workspace: dir })
   const account = personMemory(1)
   await account.service.write({operation:'create',kind:'profile_name',identity:account.identity,reason:'User name',node:{title:'Name',content:'用户的名字是 ekko',valueJson:'ekko'}})
   const requests: any[] = []
@@ -1307,7 +1417,7 @@ it('uses the complete native memory toolset within the minimum Person budget', a
   expect(JSON.stringify(requests[0].messages)).toContain('用户的名字是 ekko')
   // Leave room for variable IDs, timestamps and host paths, rather than passing
   // only when their tokenization happens to fit within a few tokens of the cap.
-  expect(Math.ceil(countTextTokens(JSON.stringify({ messages: requests[0].messages, tools: requests[0].tools })) * 1.15) + 2048 + 1024).toBeLessThanOrEqual(8000 - 128)
+  expect(Math.ceil(countTextTokens(JSON.stringify({ messages: requests[0].messages, tools: requests[0].tools })) * 1.15) + 2048 + 1024).toBeLessThanOrEqual(modelContextLength - 128)
 })
 
 it('resumes a saved task through Responses list, history search and control without exhausting steps', async () => {
@@ -1470,58 +1580,110 @@ it('removes the legacy Person memory table without changing ordinary messages', 
   expect(db.prepare('SELECT * FROM messages ORDER BY id').all()).toEqual(messages)
 })
 
-it('uses one account workspace for creation, adoption, scheduled runs and follow-up turns', async () => {
+it('keeps Bot directories independent and pins old tasks, conversations and scheduled workers', async () => {
   const { configurePerson, personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
   const { personTaskChat, continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
   const sessions = await import('../../packages/server/src/modules/studio/repositories/session-store')
   const delivery = await import('../../packages/server/src/modules/studio/services/person/delivery')
-  const selected = join(dir, 'selected-workspace')
-  await configurePerson(1, { workspace: selected, expected_revision: 1 })
-  expect((await personSnapshot(1, 'person-main-1')).session.workspace).toBe(selected)
+  const selected = join(dir, 'selected'), nextWorkspace = join(dir, 'next'), otherWorkspace = join(dir, 'other')
+  for (const path of [selected, nextWorkspace, otherWorkspace]) mkdirSync(path)
+  const other = await createPersonConversation(1, 'Other workspace', { workspace: otherWorkspace })
+  await configurePerson(1, { session_id: 'person-main-1', workspace: selected, expected_revision: 1 })
+  expect((await personSnapshot(1, other.id)).settings.workspace).toBe(otherWorkspace)
   sessions.createSession({ id: 'workspace-owned', profile: 'default', studio_user_id: '1', source: 'coding_agent' })
   sessions.addMessage({ session_id: 'workspace-owned', role: 'user', content: 'Take over this goal' })
   const goals = await import('../../packages/server/src/modules/studio/services/session-tasks')
   const original = goals.updateSessionTasks('workspace-owned', 'default', { revision: 0, changes: [{ title: 'Existing goal', summary: 'Take over', status: 'open' }] }).tasks[0]
-  const adopted = await create({ action: 'adopt', session_id: 'person-main-1', task_id: original.id, expected_revision: original.updated_at, start: false })
+  const adopted = await create({ action: 'adopt', task_id: original.id, expected_revision: original.updated_at, start: false })
+  const first = await create(), second = await create({ start: false })
   expect(adopted.task.workspace).toBe(selected)
-  const first = await create()
-  const second = await create({ start: false })
-  expect(first.task.workspace).toBe(selected)
-  expect(second.task.workspace).toBe(selected)
-  await expect(create({ workspace: join(dir, 'individual-override') })).rejects.toThrow('managed by Person')
-  await expect(configurePerson(1, { workspace: dir, expected_revision: 2 })).rejects.toThrow('Wait for Person tasks')
+  await expect(create({ workspace: otherWorkspace })).rejects.toThrow('managed by Person')
+  await configurePerson(1, { session_id: 'person-main-1', workspace: nextWorkspace, expected_revision: 2 })
   await runner.tickPersonWork(); await wait(first.execution.id, 'finished')
   await delivery.deliverPersonResults(); delivery.finishPersonDelivery(1, first.execution.id, true)
-  expect(vi.mocked(runtime.execute).mock.calls[0][0].workspace).toBe(selected)
   const chat = await personTaskChat(1, first.task.id)
-  const nextWorkspace = join(dir, 'next-workspace')
-  await configurePerson(1, { workspace: nextWorkspace, expected_revision: 2 })
-  expect(store.getPersonTask(1, first.task.id).workspace).toBe(nextWorkspace)
-  expect(store.getPersonTask(1, adopted.task.id).workspace).toBe(nextWorkspace)
-  expect(sessions.getSession(chat.session.id)?.workspace).toBe(nextWorkspace)
-  const next: any = await continuePersonTask(1, first.task.id, { input: [{ type: 'text', text: 'Continue the same work' }], expected_revision: store.getPersonTask(1, first.task.id).revision, idempotency_key: 'workspace-follow-up' })
+  expect((await personSnapshot(1, 'person-main-1')).settings.workspace).toBe(nextWorkspace)
+  expect(store.getPersonTask(1, first.task.id).workspace).toBe(selected)
+  expect(store.getPersonExecution(1, first.execution.id).workspace).toBe(selected)
+  expect(sessions.getSession(chat.session.id)?.workspace).toBe(selected)
+  expect((await create({ start: false })).task.workspace).toBe(nextWorkspace)
+  const next = await continuePersonTask(1, first.task.id, { input: [{ type: 'text', text: 'Continue' }], expected_revision: store.getPersonTask(1, first.task.id).revision, idempotency_key: 'workspace-follow-up' })
   await runner.tickPersonWork(); await wait(next.execution.id, 'finished')
   await delivery.deliverPersonResults(); delivery.finishPersonDelivery(1, next.execution.id, true)
-  expect(vi.mocked(runtime.execute).mock.calls[1][0]).toMatchObject({ sessionId: chat.session.id, workspace: nextWorkspace })
+  expect(vi.mocked(runtime.execute).mock.calls[1][0]).toMatchObject({ sessionId: chat.session.id, workspace: selected })
   const at = Date.now() + 60_000
   schedules.applyPersonSchedule(1, { action: 'create', mode: 'worker', task_id: second.task.id, kind: 'once', expression: new Date(at).toISOString(), timezone: 'UTC', idempotency_key: 'workspace-schedule' })
   schedules.tickPersonSchedules(at)
   const occurrence = store.taskPersonExecutions(1, second.task.id)[0]
   await runner.tickPersonWork(); await wait(occurrence.id, 'finished')
-  expect(vi.mocked(runtime.execute).mock.calls[2][0].workspace).toBe(nextWorkspace)
-  expect((await personSnapshot(2, 'person-main-2')).session.workspace).not.toBe(nextWorkspace)
+  expect(vi.mocked(runtime.execute).mock.calls[2][0].workspace).toBe(selected)
+  expect((await personSnapshot(1, other.id)).settings.workspace).toBe(otherWorkspace)
 })
 
-it('restores a shared private workspace when the selected workspace is cleared', async () => {
-  const { configurePerson, personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
-  await expect(configurePerson(1, { workspace: '../relative', expected_revision: 1 })).rejects.toThrow('absolute')
-  await configurePerson(1, { workspace: '', expected_revision: 1 })
-  const snapshot = await personSnapshot(1, 'person-main-1')
-  const a = await create({ start: false }); const b = await create({ start: false })
-  expect(a.task.workspace).toBe(snapshot.session.workspace)
-  expect(b.task.workspace).toBe(a.task.workspace)
-  expect(existsSync(a.task.workspace)).toBe(true)
-  await expect(configurePerson(1, { workspace: dir, expected_revision: 1 })).rejects.toThrow('changed')
+it('rejects empty, missing and unscoped Bot directory changes without creating a replacement', async () => {
+  const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+  await expect(configurePerson(1, { workspace: dir, expected_revision: 1 })).rejects.toThrow('session_id')
+  for (const workspace of ['', join(dir, 'missing')]) {
+    await expect(configurePerson(1, { session_id: 'person-main-1', workspace, expected_revision: 1 })).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+  }
+  await expect(configurePerson(1, { session_id: 'person-main-1', workspace: '../relative', expected_revision: 1 })).rejects.toThrow('absolute')
+  expect(existsSync(join(dir, 'missing'))).toBe(false)
+  expect(store.personSettings(1).revision).toBe(1)
+  db.prepare('INSERT INTO person_conversation_settings VALUES(?,?,?)').run('person-main-1', 1, '{"workspace":null}')
+  expect(store.personSettings(1, 'person-main-1').settings.workspace).toBe('')
+  await expect(create()).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+})
+
+it('fails a queued execution when its directory disappears instead of switching to the current Bot directory', async () => {
+  const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+  const selected = join(dir, 'deleted'); mkdirSync(selected)
+  await configurePerson(1, { session_id: 'person-main-1', workspace: selected, expected_revision: 1 })
+  const task = await create()
+  rmSync(selected, { recursive: true })
+  await runner.tickPersonWork(); await wait(task.execution.id, 'failed')
+  expect(runtime.execute).not.toHaveBeenCalled()
+  expect(store.getPersonExecution(1, task.execution.id).error).toContain('Workspace directory is unavailable')
+  expect(existsSync(selected)).toBe(false)
+})
+
+it('aborts and records a directory error when a running worker loses its effective directory', async () => {
+  const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+  const selected = join(dir, 'lost-during-run'); mkdirSync(selected)
+  await configurePerson(1, { session_id: 'person-main-1', workspace: selected, expected_revision: 1 })
+  vi.mocked(runtime.execute).mockImplementation(async input => {
+    input.onEvent('run.started', {})
+    rmSync(selected, { recursive: true })
+    input.onEvent('tool.started', {})
+    expect(input.signal.aborted).toBe(true)
+    return { ok: true, output: 'late success' }
+  })
+  const task = await create()
+  await runner.tickPersonWork(); await wait(task.execution.id, 'failed')
+  expect(store.getPersonExecution(1, task.execution.id)).toMatchObject({ error: expect.stringContaining('Workspace directory is unavailable') })
+  expect(existsSync(selected)).toBe(false)
+})
+
+it('freezes an admitted legacy symlink execution root for callbacks and artifacts', async () => {
+  const original = join(dir, 'original'), replacement = join(dir, 'replacement'), alias = join(dir, 'legacy-link')
+  mkdirSync(original); mkdirSync(replacement)
+  symlinkSync(original, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const task = await create()
+  db.prepare('UPDATE person_executions SET workspace=? WHERE id=?').run(alias, task.execution.id)
+  vi.mocked(runtime.execute).mockImplementation(async input => {
+    expect(input.workspace).toBe(original)
+    input.onEvent('run.started', {})
+    writeFileSync(join(original, 'artifact.txt'), 'original result')
+    writeFileSync(join(replacement, 'artifact.txt'), 'wrong project')
+    unlinkSync(alias); symlinkSync(replacement, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    return { ok: true, output: 'artifact.txt' }
+  })
+  await runner.tickPersonWork(); await wait(task.execution.id, 'finished')
+  expect(store.getPersonExecution(1, task.execution.id).workspace).toBe(original)
+  const { readPersonArtifact } = await import('../../packages/server/src/modules/studio/services/person/tools')
+  expect(await readPersonArtifact(1, task.execution.id, 'artifact.txt')).toMatchObject({ content: 'original result' })
+  const { personTurnWorkspace } = await import('../../packages/server/src/modules/studio/services/person/workspace')
+  expect(personTurnWorkspace(1, 'person-main-1', { returnExecutionId: task.execution.id })).toBe(original)
 })
 
 it('atomically clears only Person history and tasks, retaining memory, preferences, ordinary chats and files', async () => {
@@ -1661,11 +1823,11 @@ describe('Person multi-conversation ownership', () => {
   it('refreshes the directory and current name on the next turn after create, rename and delete', async () => {
     const { createPersonConversation, deletePersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
     const { updateSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
-    const b = await createPersonConversation(1, '文案')
+    const b = await createPersonConversation(1, '文案', { workspace: dir })
     expect((await requestWithDirectory()).directory).toContainEqual({ id: b.id, title: '文案' })
     updateSession('person-main-1', { title: '老板' })
     updateSession(b.id, { title: '新的会话名' })
-    const c = await createPersonConversation(1, '程序员')
+    const c = await createPersonConversation(1, '程序员', { workspace: dir })
     const updated = await requestWithDirectory()
     expect(updated.directory).toEqual(expect.arrayContaining([
       { id: 'person-main-1', title: '老板' }, { id: b.id, title: '新的会话名' }, { id: c.id, title: '程序员' },
@@ -1679,7 +1841,7 @@ describe('Person multi-conversation ownership', () => {
 
   it('binds an implicit task destination before checking idempotent retries', async () => {
     const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
-    const b = await createPersonConversation(1, 'B')
+    const b = await createPersonConversation(1, 'B', { workspace: dir })
     const request = { action: 'create', title: 'Same request', goal: 'Do work', start: false, idempotency_key: 'same-key' }
     const origin = { sessionId: 'person-main-1', runId: 'A-run', messages: [] }
     const first = await tasks.applyPersonTask(1, request, undefined, origin)
@@ -1693,7 +1855,7 @@ describe('Person multi-conversation ownership', () => {
     const { beginPersonSessionDeletion } = await import('../../packages/server/src/modules/studio/repositories/person-session-store')
     const { clearPerson } = await import('../../packages/server/src/modules/studio/services/person/history')
     const { addMessage, getSessionDetail } = await import('../../packages/server/src/modules/studio/repositories/session-store')
-    const b = await createPersonConversation(1, 'B')
+    const b = await createPersonConversation(1, 'B', { workspace: dir })
     addMessage({ session_id: 'person-main-1', role: 'user', content: 'Keep A' })
     addMessage({ session_id: b.id, role: 'user', content: 'Clear B' })
     mainBusy = 'person-main-1'
@@ -1710,8 +1872,8 @@ describe('Person multi-conversation ownership', () => {
     const { personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
     const { createSession, addMessage } = await import('../../packages/server/src/modules/studio/repositories/session-store')
     expect((await personSnapshot(1)).session).toBeNull()
-    const a = await createPersonConversation(1, '研发')
-    const b = await createPersonConversation(1, '旅行')
+    const a = await createPersonConversation(1, '研发', { workspace: dir })
+    const b = await createPersonConversation(1, '旅行', { workspace: dir })
     expect(a.id).not.toBe(b.id)
     expect(a.id).toMatch(/^person-main-[a-f0-9-]{36}$/)
     expect(a.bot_type).toBe('zhezhe')
@@ -1722,7 +1884,14 @@ describe('Person multi-conversation ownership', () => {
     expect(personConversations(1, 'NEEDLE-MULTI').sessions.map(session => session.id)).toEqual([b.id])
     expect((await personSnapshot(1, a.id)).settings.agents).toEqual((await personSnapshot(1, b.id)).settings.agents)
     expect(personConversations(2, 'NEEDLE-MULTI').sessions.map(session => session.id)).toEqual(['person-main-2'])
-    await expect(createPersonConversation(1, '  ')).rejects.toThrow('conversation name')
+    addMessage({ session_id: b.id, role: 'tool', content: 'PRIVATE-TOOL-SEARCH', tool_call_id: 'c' })
+    addMessage({ session_id: b.id, role: 'assistant', content: '<think>PRIVATE-THOUGHT-SEARCH</think>Public search answer' })
+    for (const query of ['PRIVATE-TOOL-SEARCH', 'PRIVATE-THOUGHT-SEARCH']) {
+      const hit = personConversations(1, query).sessions.find(session => session.id === b.id)
+      expect(hit).toMatchObject({ matched_message_id: null, snippet: null })
+    }
+    expect(personConversations(1, 'Public search answer').sessions.find(session => session.id === b.id)?.snippet).toBe('Public search answer')
+    await expect(createPersonConversation(1, '  ', { workspace: dir })).rejects.toThrow('conversation name')
   })
 
   it('rejects duplicate BOT names across all owned pages and concurrent creates', async () => {
@@ -1730,11 +1899,11 @@ describe('Person multi-conversation ownership', () => {
     const { createSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
     for (let i = 0; i < 55; i++) createSession({ id: `person-main-page-${i}`, studio_user_id: 1, title: `Bot ${i}` })
     const count = db.prepare('SELECT COUNT(*) AS n FROM sessions').get()!.n
-    await expect(createPersonConversation(1, '  ＢＯＴ ０  ')).rejects.toMatchObject({ status: 409, code: 'PERSON_BOT_NAME_EXISTS' })
+    await expect(createPersonConversation(1, '  ＢＯＴ ０  ', { workspace: dir })).rejects.toMatchObject({ status: 409, code: 'PERSON_BOT_NAME_EXISTS' })
     expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()!.n).toBe(count)
-    await expect(createPersonConversation(2, 'Bot 0')).resolves.toMatchObject({ title: 'Bot 0' })
+    await expect(createPersonConversation(2, 'Bot 0', { workspace: dir })).resolves.toMatchObject({ title: 'Bot 0' })
     createSession({ id: 'ordinary-same-name', studio_user_id: 1, title: 'Helper' })
-    const results = await Promise.allSettled([createPersonConversation(1, 'Helper'), createPersonConversation(1, 'helper')])
+    const results = await Promise.allSettled([createPersonConversation(1, 'Helper', { workspace: dir }), createPersonConversation(1, 'helper', { workspace: dir })])
     expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
     expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 409, code: 'PERSON_BOT_NAME_EXISTS' } })
     const { conversationCreate } = await import('../../packages/server/src/modules/studio/controllers/person')
@@ -1743,35 +1912,27 @@ describe('Person multi-conversation ownership', () => {
     expect(ctx).toMatchObject({ status: 409, body: { code: 'PERSON_BOT_NAME_EXISTS' } })
   })
 
-  it('commits a selected shared workspace with creation and rejects stale or busy changes', async () => {
+  it('creates a Bot with its chosen directory without changing another busy Bot', async () => {
     const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
-    const { getSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
     const old = store.personSettings(1)
-    const workspace = join(dir, 'chosen')
+    const workspace = join(dir, 'chosen'); mkdirSync(workspace)
+    const task = await create()
+    mainBusy = 'person-main-1'
     const created = await createPersonConversation(1, 'Workspace bot', { workspace, expected_revision: old.revision })
     expect(created.workspace).toBe(workspace)
-    expect(store.personSettings(1)).toMatchObject({ settings: { workspace }, revision: old.revision + 1 })
-    expect(getSession('person-main-1')?.workspace).toBe(workspace)
-    expect(existsSync(workspace)).toBe(true)
-    const before = db.prepare('SELECT id,workspace FROM sessions ORDER BY id').all()
-    await expect(createPersonConversation(1, 'Stale', { workspace: dir, expected_revision: old.revision })).rejects.toThrow('Settings changed')
-    await expect(createPersonConversation(1, 'Relative', { workspace: 'relative' })).rejects.toThrow('absolute')
-    mainBusy = true
-    await expect(createPersonConversation(1, 'Busy', { workspace: dir, expected_revision: old.revision + 1 })).rejects.toThrow('Wait for Person')
-    mainBusy = false
-    await expect(createPersonConversation(1, 'workspace bot', { workspace: dir, expected_revision: old.revision + 1 })).rejects.toMatchObject({ code: 'PERSON_BOT_NAME_EXISTS' })
-    expect(db.prepare('SELECT id,workspace FROM sessions ORDER BY id').all()).toEqual(before)
-    expect(store.personSettings(1).settings.workspace).toBe(workspace)
-    const task = await create()
-    await expect(createPersonConversation(1, 'Pending task', { workspace: dir, expected_revision: old.revision + 1 })).rejects.toThrow('Wait for Person')
-    expect(store.getPersonTask(1, task.task.id).workspace).toBe(workspace)
+    expect(store.personSettings(1)).toEqual(old)
+    expect(store.getPersonTask(1, task.task.id).workspace).toBe(dir)
+    await expect(createPersonConversation(1, 'Stale', { workspace, expected_revision: old.revision - 1 })).rejects.toThrow('Settings changed')
+    await expect(createPersonConversation(1, 'Missing', { workspace: join(dir, 'missing') })).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+    await expect(createPersonConversation(1, 'Not selected')).rejects.toMatchObject({ code: 'BOT_WORKSPACE_REQUIRED' })
+    expect(existsSync(join(dir, 'missing'))).toBe(false)
   })
 
   it('creates and reloads every supplied character without coupling its identity to the conversation name', async () => {
     const { createPersonConversation, personConversations } = await import('../../packages/server/src/modules/studio/services/person/conversations')
     const { personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
     for (const bot of PERSON_BOTS) {
-      const created = await createPersonConversation(1, `My ${bot.type} companion`, { bot_type: bot.type })
+      const created = await createPersonConversation(1, `My ${bot.type} companion`, { workspace: dir, bot_type: bot.type })
       expect(created.bot_type).toBe(bot.type)
       expect((await personSnapshot(1, created.id)).session?.bot_type).toBe(bot.type)
       expect(personConversations(1).sessions.find(session => session.id === created.id)?.bot_type).toBe(bot.type)
@@ -1783,14 +1944,14 @@ describe('Person multi-conversation ownership', () => {
     const { personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
     catalog[0].models.push('m2')
     const before = store.personSettings(1, 'person-main-1')
-    const created = await createPersonConversation(1, '我的旅行搭子', { bot_type: 'zhezhe', model: { profile: 'default', provider: 'test', model: 'm2' }, reasoning_effort: 'high' })
+    const created = await createPersonConversation(1, '我的旅行搭子', { workspace: dir, bot_type: 'zhezhe', model: { profile: 'default', provider: 'test', model: 'm2' }, reasoning_effort: 'high' })
     expect(created).toMatchObject({ title: '我的旅行搭子', bot_type: 'zhezhe', model: 'm2', reasoning_effort: 'high' })
     expect(personConversations(1).sessions.find(session => session.id === created.id)?.bot_type).toBe('zhezhe')
     expect((await personSnapshot(1, created.id)).settings.model?.model).toBe('m2')
     expect(store.personSettings(1, 'person-main-1')).toEqual(before)
     const count = personConversations(1).sessions.length
     for (const input of [{ bot_type: 'unknown' }, { model: { profile: 'default', provider: 'test', model: 'missing' } }, { reasoning_effort: 'invalid' }]) {
-      await expect(createPersonConversation(1, 'Invalid', input)).rejects.toThrow()
+      await expect(createPersonConversation(1, 'Invalid', { workspace: dir, ...input })).rejects.toThrow()
     }
     expect(personConversations(1).sessions).toHaveLength(count)
   })
@@ -1814,8 +1975,8 @@ describe('Person multi-conversation ownership', () => {
     const { personTools } = await import('../../packages/server/src/modules/studio/services/person/tools')
     const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
     const delivery = await import('../../packages/server/src/modules/studio/services/person/delivery')
-    const a = await createPersonConversation(1, 'A')
-    const b = await createPersonConversation(1, 'B')
+    const a = await createPersonConversation(1, 'A', { workspace: dir })
+    const b = await createPersonConversation(1, 'B', { workspace: dir })
     const origin = { sessionId: a.id, runId: 'from-A', messages: [{ role: 'user' as const, content: '让 B 做报告' }] }
     const toolset = personTools(1, 'main', undefined, a.id)
     const sessions: any = await toolset.find(tool => tool.name === 'bot_sessions_query')!.execute({ search: 'B' })
@@ -1850,8 +2011,8 @@ describe('Person multi-conversation ownership', () => {
     const { getSession, addMessage } = await import('../../packages/server/src/modules/studio/repositories/session-store')
     const { personMemory, personMemories } = await import('../../packages/server/src/modules/studio/services/person/memory')
     const { createPersonContext } = await import('../../packages/server/src/modules/studio/services/person/context')
-    const a = await createPersonConversation(1, 'A')
-    const b = await createPersonConversation(1, 'B')
+    const a = await createPersonConversation(1, 'A', { workspace: dir })
+    const b = await createPersonConversation(1, 'B', { workspace: dir })
     addMessage({ session_id: b.id, role: 'user', content: 'B-only old topic' })
     const context = createPersonContext(1, a.id, 16000)
     const account = personMemory(1)
@@ -1873,7 +2034,7 @@ describe('Person multi-conversation ownership', () => {
   it('waits for native stop before deleting running work and rejects dispatch into a deleting conversation', async () => {
     const { createPersonConversation, deletePersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
     const { getSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
-    const b = await createPersonConversation(1, 'Running B')
+    const b = await createPersonConversation(1, 'Running B', { workspace: dir })
     let acknowledge!: () => void
     runtime.stop = vi.fn(() => new Promise<void>(resolve => { acknowledge = resolve }))
     runtime.execute = vi.fn(input => new Promise(resolve => input.signal.addEventListener('abort', () => resolve({ ok: true, output: 'Late output must be ignored' }), { once: true })))
@@ -1893,7 +2054,7 @@ describe('Person multi-conversation ownership', () => {
     const { createPersonConversation, deletePersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
     const { getSession } = await import('../../packages/server/src/modules/studio/repositories/session-store')
     const { requirePersonSession } = await import('../../packages/server/src/modules/studio/repositories/person-session-store')
-    const b = await createPersonConversation(1, 'Retry B')
+    const b = await createPersonConversation(1, 'Retry B', { workspace: dir })
     const { task, execution } = await create({ session_id: b.id })
     db.prepare("UPDATE person_executions SET state='running',generation=1 WHERE id=?").run(execution.id)
     vi.mocked(runtime.stop).mockRejectedValueOnce(new Error('Native stop unavailable'))
@@ -1922,7 +2083,9 @@ describe('legacy Person planned role flow', () => {
   async function fixture() {
     const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
     const { personTools } = await import('../../packages/server/src/modules/studio/services/person/tools')
-    const b = await createPersonConversation(1, '文案'), c = await createPersonConversation(1, '程序员')
+    const bRoot = join(dir, 'copy-root'), cRoot = join(dir, 'code-root')
+    mkdirSync(bRoot); mkdirSync(cRoot)
+    const b = await createPersonConversation(1, '文案', { workspace: bRoot }), c = await createPersonConversation(1, '程序员', { workspace: cRoot })
     const role = (id: string, executionId?: string) => {
       const tools = personTools(1, 'main', undefined, id)
       const origin = { sessionId: id, runId: `role-${id}`, messages: [{ role: 'user' as const, content: '按保存的流程处理同一份成果' }], ...(executionId ? { returnExecutionId: executionId } : {}) }
@@ -1948,6 +2111,9 @@ describe('legacy Person planned role flow', () => {
     let executionId = created.execution.id
     for (const [index, current, target] of [[0, b.id, c.id], [1, c.id, 'person-main-1'], [2, 'person-main-1', null]] as const) {
       await runner.tickPersonWork(); await wait(executionId, 'finished')
+      expect(store.getPersonExecution(1, executionId).workspace).toBe(b.workspace)
+      expect(vi.mocked(runtime.execute).mock.calls.at(-1)![0].workspace).toBe(b.workspace)
+      expect(store.personSettings(1, c.id).settings.workspace).toBe(c.workspace)
       expect(store.getPersonTask(1, taskId).status).toBe('open')
       await delivery.deliverPersonResults()
       expect(vi.mocked(runtime.deliver).mock.calls.at(-1)![0]).toMatchObject({ origin: { sessionId: current }, flow: { index, next_session_id: target }, returnExpectation: expect.any(String) })
@@ -2210,5 +2376,531 @@ describe('deleting Person schedules', () => {
     const { deliverPersonResults } = await import('../../packages/server/src/modules/studio/services/person/delivery')
     await deliverPersonResults()
     expect(runtime.deliver).toHaveBeenCalledWith(expect.objectContaining({ executionId: execution.id, output: 'Finished after deleting the schedule' }))
+  })
+})
+
+
+it.each([true, false])('inserts a selected durable follow-up, preserves the rest, and suppresses an interrupted return (ok=%s)', async ok => {
+  const { continuePersonTask, personTaskChat } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { ensurePersonSession } = await import('../../packages/server/src/modules/studio/services/person/chat-agent')
+  await ensurePersonSession(1, 'person-main-1')
+  const finish: Array<(value: any) => void> = []
+  runtime.execute = vi.fn(input => { input.onEvent('run.started', { run_id: `native-${finish.length}` }); return new Promise(resolve => finish.push(resolve)) })
+  runtime.interruptForInsertion = vi.fn(async () => ({ status: 'accepted', phase: 'tool_batch' }))
+  const { task, execution } = await create()
+  await runner.tickPersonWork(); await wait(execution.id, 'running')
+  const append = async (text: string, file = false) => continuePersonTask(1, task.id, {
+    input: [{ type: 'text', text }, ...(file ? [{ type: 'file', name: 'report.txt', path: '/tmp/report.txt' }] : [])],
+    expected_revision: store.getPersonTask(1, task.id).revision, idempotency_key: text,
+  })
+  const first = await append('Earlier follow-up')
+  const selected = await append('Selected follow-up', true)
+  const observed = store.getPersonTask(1, task.id)
+  const request = { queue_id: selected.execution.id, expected_execution_id: execution.id, expected_revision: observed.revision, idempotency_key: 'select-next' }
+  await insertPersonTaskMessage(1, task.id, request)
+  await insertPersonTaskMessage(1, task.id, request)
+  expect(runtime.interruptForInsertion).toHaveBeenCalledExactlyOnceWith(execution.session_id, 'native-0')
+  const chat = await personTaskChat(1, task.id)
+  expect(chat.pending.map(item => item.id)).toEqual([selected.execution.id, first.execution.id])
+  expect(chat.insertion).toMatchObject({ queueId: selected.execution.id, phase: 'waiting_for_tool_batch' })
+  await runner.tickPersonWork(); expect(runtime.execute).toHaveBeenCalledTimes(1)
+  finish[0]({ ok, interrupted: true, stop_reason: 'queue_insertion', output: 'partial result' })
+  await wait(execution.id, 'interrupted')
+  expect(db.prepare('SELECT state FROM person_deliveries WHERE execution_id=?').get(execution.id)?.state).toBe('cancelled')
+  expect(store.getPersonTask(1, task.id).status).toBe('open')
+  await runner.tickPersonWork(); await wait(selected.execution.id, 'running')
+  expect(vi.mocked(runtime.execute).mock.calls[1][0]).toMatchObject({ sessionId: execution.session_id, prompt: [
+    { type: 'text', text: 'Selected follow-up' }, { type: 'file', name: 'report.txt', path: '/tmp/report.txt' },
+  ] })
+  expect(store.getPersonExecution(1, first.execution.id).state).toBe('pending')
+  finish[1]({ ok: true, output: 'selected done' }); await wait(selected.execution.id, 'finished')
+  await runner.tickPersonWork(); await wait(first.execution.id, 'running')
+  finish[2]({ ok: true, output: 'earlier done' }); await wait(first.execution.id, 'finished')
+  await runner.tickPersonWork()
+  expect(store.getPersonTask(1, task.id)).toMatchObject({ status: 'completed', pending_count: 0 })
+  expect(vi.mocked(runtime.deliver).mock.calls.map(([delivery]) => delivery.executionId)).toEqual([selected.execution.id, first.execution.id])
+})
+
+it('fences insertion by owner, revision, active execution and conversation, and rolls back unsupported priority', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running'); store.personEvent(execution, 'run.started', { run_id: 'native' })
+  runtime.interruptForInsertion = vi.fn(async () => ({ status: 'unsupported' }))
+  const first = await continuePersonTask(1, task.id, { input: [{ type:'text', text:'first' }], expected_revision: 0, idempotency_key:'first' })
+  const second = await continuePersonTask(1, task.id, { input: [{ type:'text', text:'second' }], expected_revision: 1, idempotency_key:'second' })
+  const request = { queue_id: second.execution.id, expected_execution_id: execution.id, expected_revision:2, idempotency_key:'insert' }
+  await expect(insertPersonTaskMessage(2,task.id,request)).rejects.toThrow('not found')
+  await expect(insertPersonTaskMessage(1,task.id,{...request,expected_revision:1})).rejects.toThrow('changed')
+  await expect(insertPersonTaskMessage(1,task.id,{...request,expected_execution_id:first.execution.id})).rejects.toThrow('changed')
+  db.prepare('UPDATE person_executions SET session_id=? WHERE id=?').run('person-task-historical',second.execution.id)
+  await expect(insertPersonTaskMessage(1,task.id,request)).rejects.toThrow('changed')
+  db.prepare('UPDATE person_executions SET session_id=? WHERE id=?').run(execution.session_id,second.execution.id)
+  await expect(insertPersonTaskMessage(1,task.id,request)).rejects.toThrow('unsupported')
+  expect(store.pendingPersonInputs(1,task.id).map(item=>item.id)).toEqual([first.execution.id,second.execution.id])
+  expect(store.getPersonExecution(1,execution.id).state).toBe('running')
+})
+
+it('retains a failed insertion receipt on retry without claiming success or consuming the queued input', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { applyResponseStreamEvent } = await import('../../packages/server/src/modules/studio/services/chat-run/response-stream')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running')
+  const event = applyResponseStreamEvent({ queue: [] } as any, execution.session_id, 'turn-1', 'response.created', { response: { id: 'response-1' } })!
+  store.personEvent(execution, event.event, event.payload)
+  runtime.interruptForInsertion = vi.fn(async () => ({ status: 'run_mismatch' }))
+  const followup = await continuePersonTask(1, task.id, {
+    input: [{ type: 'text', text: 'Protect the SDK' }], expected_revision: 0, idempotency_key: 'followup',
+  })
+  const request = { queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'insert' }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(insertPersonTaskMessage(1, task.id, request)).rejects.toMatchObject({
+      status: 409, message: 'Task insertion unavailable: run_mismatch',
+    })
+  }
+  expect(runtime.interruptForInsertion).toHaveBeenCalledExactlyOnceWith(execution.session_id, 'response-1', 'turn-1')
+  expect(store.getPersonExecution(1, execution.id)).toMatchObject({ state: 'running', insertion_phase: 'failed' })
+  expect(store.pendingPersonInputs(1, task.id)).toEqual([{ id: followup.execution.id, input: [{ type: 'text', text: 'Protect the SDK' }] }])
+  expect(store.getPersonExecution(1, followup.execution.id).queue_priority).toBe(0)
+  expect(runtime.execute).not.toHaveBeenCalled()
+})
+
+it('rejects an old insertion replay after a different queued target supersedes it', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running')
+  store.personEvent(execution, 'run.started', { run_id: 'native' })
+  const first = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'First' }], expected_revision: 0, idempotency_key: 'first' })
+  const second = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'Second' }], expected_revision: 1, idempotency_key: 'second' })
+  runtime.interruptForInsertion = vi.fn().mockResolvedValueOnce({ status: 'run_mismatch' }).mockResolvedValue({ status: 'accepted', phase: 'model' })
+  const request = { queue_id: first.execution.id, expected_execution_id: execution.id, expected_revision: 2, idempotency_key: 'insert-first' }
+  await expect(insertPersonTaskMessage(1, task.id, request)).rejects.toMatchObject({ status: 409 })
+  await insertPersonTaskMessage(1, task.id, { ...request, queue_id: second.execution.id,
+    expected_revision: store.getPersonTask(1, task.id).revision, idempotency_key: 'insert-second' })
+  const selected = store.getPersonExecution(1, execution.id)
+  await expect(insertPersonTaskMessage(1, task.id, request)).rejects.toMatchObject({ status: 409, message: 'Task changed; refresh and try again' })
+  expect(runtime.interruptForInsertion).toHaveBeenCalledTimes(2)
+  expect(store.getPersonExecution(1, execution.id)).toEqual(selected)
+  expect(store.pendingPersonInputs(1, task.id).map(item => item.id)).toEqual([second.execution.id, first.execution.id])
+})
+
+it.each(['accepted', 'run_mismatch'])('rejects a late %s insertion acknowledgement after pause revokes the execution generation', async status => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running')
+  store.personEvent(execution, 'run.started', { run_id: 'response-1', run_marker: 'turn-1' })
+  let acknowledge!: (value: { status: string }) => void
+  runtime.interruptForInsertion = vi.fn(() => new Promise(resolve => { acknowledge = resolve }))
+  const followup = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'Keep this receipt' }], expected_revision: 0, idempotency_key: 'followup' })
+  const request = { queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'insert' }
+  const insertion = insertPersonTaskMessage(1, task.id, request)
+  await vi.waitFor(() => expect(runtime.interruptForInsertion).toHaveBeenCalledOnce())
+  await tasks.applyPersonTask(1, { action: 'stop', task_id: task.id, execution_id: execution.id,
+    expected_revision: store.getPersonTask(1, task.id).revision, idempotency_key: 'pause' })
+  await wait(execution.id, 'interrupted')
+  const stopped = store.getPersonExecution(1, execution.id)
+  acknowledge({ status })
+  await expect(insertion).rejects.toMatchObject({ status: 409, message: 'Task changed; refresh and try again' })
+  await expect(insertPersonTaskMessage(1, task.id, request)).rejects.toMatchObject({ status: 409 })
+  expect(store.getPersonExecution(1, execution.id)).toEqual(stopped)
+  expect(store.getPersonExecution(1, followup.execution.id)).toMatchObject({ state: 'interrupted', input_json: followup.execution.input_json })
+  expect(store.pendingPersonInputs(1, task.id)).toEqual([])
+  expect(runtime.execute).not.toHaveBeenCalled()
+})
+
+it.each(['stopping', 'interrupted', 'finished', 'failed'] as const)('rejects a fresh insertion after %s without consuming the queued input', async state => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running')
+  store.personEvent(execution, 'run.started', { run_id: 'native' })
+  const followup = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'Keep the input' }], expected_revision: 0, idempotency_key: 'followup' })
+  store.setPersonExecution(execution, state)
+  runtime.interruptForInsertion = vi.fn(async () => ({ status: 'accepted' }))
+  const before = db.prepare('SELECT * FROM person_executions WHERE task_id=? ORDER BY id').all(task.id)
+  await expect(insertPersonTaskMessage(1, task.id, {
+    queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'insert',
+  })).rejects.toMatchObject({ status: 409 })
+  expect(db.prepare('SELECT * FROM person_executions WHERE task_id=? ORDER BY id').all(task.id)).toEqual(before)
+  expect(runtime.interruptForInsertion).not.toHaveBeenCalled()
+  expect(store.pendingPersonInputs(1, task.id).map(item => item.id)).toEqual([followup.execution.id])
+})
+
+it('waits for startup identity and deduplicates simultaneous insertion requests without losing the queued turn', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage, dispatchPersonInsertion } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'starting')
+  runtime.interruptForInsertion = vi.fn(async () => ({ status: 'accepted', phase: 'model' }))
+  const followup = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'Queued during startup' }], expected_revision: 0, idempotency_key: 'followup' })
+  const request = { queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'insert' }
+  const waiting = await insertPersonTaskMessage(1, task.id, request)
+  expect(waiting.insertion).toEqual({ queueId: followup.execution.id, phase: 'requesting' })
+  expect(runtime.interruptForInsertion).not.toHaveBeenCalled()
+  store.personEvent(execution, 'run.started', { run_id: 'response-1', run_marker: 'turn-1' })
+  const current = store.getPersonExecution(1, execution.id)
+  await Promise.all([insertPersonTaskMessage(1, task.id, request), dispatchPersonInsertion(current), dispatchPersonInsertion(current)])
+  expect(runtime.interruptForInsertion).toHaveBeenCalledExactlyOnceWith(execution.session_id, 'response-1', 'turn-1')
+  expect(store.getPersonExecution(1, execution.id).insertion_phase).toBe('stopping_current_turn')
+  expect(store.pendingPersonInputs(1, task.id).map(item => item.id)).toEqual([followup.execution.id])
+})
+
+it('delivers the durable follow-up once when the active turn completes naturally during insertion', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running')
+  store.personEvent(execution, 'run.started', { run_id: 'native' })
+  const followup = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'Natural completion follow-up' }], expected_revision: 0, idempotency_key: 'followup' })
+  runtime.interruptForInsertion = vi.fn(async () => {
+    store.setPersonExecution(execution, 'finished')
+    return { status: 'not_running' }
+  })
+  const request = { queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'insert' }
+  await insertPersonTaskMessage(1, task.id, request)
+  await insertPersonTaskMessage(1, task.id, request)
+  expect(store.getPersonExecution(1, followup.execution.id).state).toBe('pending')
+  for (let tick = 0; tick < 3; tick++) {
+    await runner.tickPersonWork()
+    await wait(followup.execution.id, 'finished')
+  }
+  expect(runtime.execute).toHaveBeenCalledOnce()
+  expect(vi.mocked(runtime.execute).mock.calls[0][0]).toMatchObject({ sessionId: execution.session_id, prompt: [{ type: 'text', text: 'Natural completion follow-up' }] })
+  expect(vi.mocked(runtime.deliver).mock.calls.filter(([item]) => item.executionId === followup.execution.id)).toHaveLength(1)
+})
+
+it('rejects new input during stopping, then accepts one fresh follow-up after pause without reviving cancelled inputs', async () => {
+  const { continuePersonTask, personTaskChat } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution, 'running')
+  const oldRequest = { input: [{ type: 'text', text: 'Old queued input' }], expected_revision: 0, idempotency_key: 'old' }
+  const old = await continuePersonTask(1, task.id, oldRequest)
+  let stopped!: () => void
+  runtime.stop = vi.fn(() => new Promise<void>(resolve => { stopped = resolve }))
+  await tasks.applyPersonTask(1, { action: 'stop', task_id: task.id, execution_id: execution.id, expected_revision: 1, idempotency_key: 'pause' })
+  await vi.waitFor(() => expect(runtime.stop).toHaveBeenCalledOnce())
+  const freshInput = [{ type: 'text', text: 'Fresh protection scope after pause' }]
+  const snapshot = store.getPersonTask(1, task.id)
+  const request = { input: freshInput, expected_revision: snapshot.revision, expected_execution_id: snapshot.execution_id, execution_id: execution.id, idempotency_key: 'fresh' }
+  await expect(continuePersonTask(1, task.id, request)).rejects.toMatchObject({ status: 409, message: 'Task is stopping; wait for acknowledgement' })
+  expect(db.prepare('SELECT count(*) AS n FROM person_executions WHERE task_id=?').get(task.id)?.n).toBe(2)
+  expect(store.getPersonExecution(1, old.execution.id)).toMatchObject({ state: 'interrupted', input_json: old.execution.input_json })
+  stopped()
+  await wait(execution.id, 'interrupted')
+  const cancelledReceipt = await continuePersonTask(1, task.id, oldRequest)
+  expect(cancelledReceipt).toMatchObject({ task: { running: false, pending_count: 0 }, execution: { id: old.execution.id, state: 'interrupted' }, pending: [] })
+  const paused = store.getPersonTask(1, task.id)
+  const freshRequest = { ...request, expected_execution_id: paused.execution_id, expected_revision: paused.revision }
+  const [fresh, duplicate] = await Promise.all([continuePersonTask(1, task.id, freshRequest), continuePersonTask(1, task.id, freshRequest)])
+  expect(duplicate.execution.id).toBe(fresh.execution.id)
+  expect(fresh.execution).toMatchObject({ state: 'queued', session_id: execution.session_id })
+  expect((await personTaskChat(1, task.id)).pending.map(item => item.id)).toEqual([fresh.execution.id])
+  await runner.tickPersonWork()
+  await wait(fresh.execution.id, 'finished')
+  await runner.tickPersonWork()
+  expect(runtime.execute).toHaveBeenCalledOnce()
+  expect(vi.mocked(runtime.execute).mock.calls[0][0]).toMatchObject({ sessionId: execution.session_id, prompt: freshInput })
+  expect(vi.mocked(runtime.deliver).mock.calls.map(([item]) => item.executionId)).toEqual([fresh.execution.id])
+  expect(await continuePersonTask(1, task.id, freshRequest)).toMatchObject({
+    task: { running: true }, execution: { id: fresh.execution.id, state: 'finished' },
+  })
+  const { finishPersonDelivery } = await import('../../packages/server/src/modules/studio/services/person/delivery')
+  finishPersonDelivery(1, fresh.execution.id, true)
+  expect(await continuePersonTask(1, task.id, freshRequest)).toMatchObject({
+    task: { running: false, pending_count: 0 }, execution: { id: fresh.execution.id, state: 'finished' }, pending: [],
+  })
+  expect(store.getPersonExecution(1, old.execution.id).state).toBe('interrupted')
+})
+
+it('retains an insertion intent across a transient dispatch failure and preserves priority through schema reinitialization', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage, dispatchPersonInsertion } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { initPersonTables } = await import('../../packages/server/src/modules/studio/infrastructure/database/person-schema')
+  const { task, execution } = await create()
+  store.setPersonExecution(execution,'running'); store.personEvent(execution,'run.started',{run_id:'native'})
+  runtime.interruptForInsertion=vi.fn().mockRejectedValueOnce(new Error('temporary disconnect')).mockResolvedValue({status:'accepted',phase:'model'})
+  await continuePersonTask(1,task.id,{input:[{type:'text',text:'first'}],expected_revision:0,idempotency_key:'first'})
+  const second=await continuePersonTask(1,task.id,{input:[{type:'text',text:'second'}],expected_revision:1,idempotency_key:'second'})
+  await expect(insertPersonTaskMessage(1,task.id,{queue_id:second.execution.id,expected_execution_id:execution.id,expected_revision:2,idempotency_key:'insert'})).rejects.toThrow('disconnect')
+  initPersonTables(db)
+  expect(store.pendingPersonInputs(1,task.id)[0].id).toBe(second.execution.id)
+  await dispatchPersonInsertion(store.getPersonExecution(1,execution.id))
+  expect(store.getPersonExecution(1,execution.id).insertion_phase).toBe('stopping_current_turn')
+  store.setPersonExecution(execution,'interrupted')
+  store.promotePersonFollowups()
+  expect(store.getPersonExecution(1,second.execution.id).state).toBe('queued')
+})
+
+it('removes one durable follow-up idempotently, preserves the worker and remaining input, and never delivers the removed turn', async () => {
+  const { continuePersonTask, personTaskChat } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { removePersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const finish: Array<(value: any) => void> = []
+  runtime.execute = vi.fn(input => { input.onEvent('run.started', {}); return new Promise(resolve => finish.push(resolve)) })
+  const { task, execution } = await create()
+  await runner.tickPersonWork(); await wait(execution.id, 'running')
+  const first = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'Remove this' }], expected_revision: 0, idempotency_key: 'first' })
+  const second = await continuePersonTask(1, task.id, { input: [{ type: 'file', name: 'keep.txt', path: '/tmp/keep.txt' }], expected_revision: 1, idempotency_key: 'second' })
+  const request = { queue_id: first.execution.id, expected_execution_id: execution.id, expected_revision: 2, idempotency_key: 'remove-first' }
+  const result = removePersonTaskMessage(1, task.id, request)
+  expect(result.task.revision).toBe(3)
+  expect(result.pending).toEqual([{ id: second.execution.id, input: [{ type: 'file', name: 'keep.txt', path: '/tmp/keep.txt' }] }])
+  expect(result.canRemove).toBe(true)
+  expect(removePersonTaskMessage(1, task.id, request)).toEqual(result)
+  expect(() => removePersonTaskMessage(1, task.id, { ...request, queue_id: second.execution.id })).toThrow('Idempotency')
+  expect(store.getPersonTask(1, task.id).revision).toBe(3)
+  expect(store.getPersonExecution(1, execution.id).state).toBe('running')
+  expect(store.getPersonExecution(1, first.execution.id)).toMatchObject({ state: 'interrupted', generation: first.execution.generation + 1 })
+  expect(db.prepare('SELECT state FROM person_deliveries WHERE execution_id=?').get(first.execution.id)?.state).toBe('cancelled')
+  expect((await personTaskChat(1, task.id)).pending.map(item => item.id)).toEqual([second.execution.id])
+  await runner.tickPersonWork(); expect(runtime.execute).toHaveBeenCalledTimes(1)
+  expect(runtime.stop).not.toHaveBeenCalled()
+  finish[0]({ ok: true, output: 'original done' }); await wait(execution.id, 'finished')
+  await runner.tickPersonWork(); await wait(second.execution.id, 'running')
+  expect(vi.mocked(runtime.execute).mock.calls[1][0].prompt).toEqual([{ type: 'file', name: 'keep.txt', path: '/tmp/keep.txt' }])
+  finish[1]({ ok: true, output: 'remaining done' }); await wait(second.execution.id, 'finished')
+  await runner.tickPersonWork()
+  expect(vi.mocked(runtime.deliver).mock.calls.some(([item]) => item.executionId === first.execution.id)).toBe(false)
+})
+
+it('removes an unstarted queued head while keeping its next follow-up schedulable', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { removePersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create(); store.setPersonExecution(execution, 'finished')
+  const first = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'queued head' }], expected_revision: 0, idempotency_key: 'head' })
+  const second = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'remaining' }], expected_revision: 1, idempotency_key: 'tail' })
+  expect(first.execution.state).toBe('queued')
+  const result = removePersonTaskMessage(1, task.id, { queue_id: first.execution.id, expected_execution_id: first.execution.id, expected_revision: 2, idempotency_key: 'remove-head' })
+  expect(result.pending.map(item => item.id)).toEqual([second.execution.id])
+  store.promotePersonFollowups()
+  expect(store.getPersonExecution(1, second.execution.id).state).toBe('queued')
+  expect(runtime.stop).not.toHaveBeenCalled()
+})
+
+it.each(['revision', 'execution', 'task', 'conversation', 'requirements', 'started', 'stopping', 'closed'])('rejects removal fenced by %s without mutating the queue', async fence => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { removePersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create(); store.setPersonExecution(execution, 'running')
+  const followup = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'keep' }], expected_revision: 0, idempotency_key: 'followup' })
+  const request = { queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'remove' }
+  if (fence === 'revision') request.expected_revision = 0
+  if (fence === 'execution') request.expected_execution_id = followup.execution.id
+  if (fence === 'task') db.prepare('UPDATE person_executions SET task_id=? WHERE id=?').run((await create()).task.id, followup.execution.id)
+  if (fence === 'conversation') db.prepare('UPDATE person_executions SET session_id=? WHERE id=?').run('person-task-history', followup.execution.id)
+  if (fence === 'requirements') db.prepare('UPDATE person_executions SET requirements_revision=requirements_revision+1 WHERE id=?').run(followup.execution.id)
+  if (fence === 'started') {
+    store.setPersonExecution(execution, 'finished'); store.setPersonExecution(followup.execution, 'running')
+    request.expected_execution_id = followup.execution.id
+  }
+  if (fence === 'stopping') store.setPersonExecution(execution, 'stopping')
+  if (fence === 'closed') db.prepare("UPDATE session_tasks SET status='closed' WHERE id=?").run(task.id)
+  const before = db.prepare('SELECT * FROM person_executions ORDER BY id').all()
+  expect(() => removePersonTaskMessage(2, task.id, request)).toThrow('not found')
+  expect(() => removePersonTaskMessage(1, task.id, request)).toThrow(/changed|unavailable/i)
+  expect(db.prepare('SELECT * FROM person_executions ORDER BY id').all()).toEqual(before)
+  expect(store.getPersonTask(1, task.id).revision).toBe(1)
+})
+
+it('keeps the insertion target protected while permitting removal of another pending turn', async () => {
+  const { continuePersonTask } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { insertPersonTaskMessage, removePersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create(); store.setPersonExecution(execution, 'running')
+  store.personEvent(execution, 'run.started', { run_id: 'native' })
+  runtime.interruptForInsertion = vi.fn(async () => ({ status: 'accepted', phase: 'tool_batch' }))
+  const first = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'first' }], expected_revision: 0, idempotency_key: 'first' })
+  const selected = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'selected' }], expected_revision: 1, idempotency_key: 'selected' })
+  await insertPersonTaskMessage(1, task.id, { queue_id: selected.execution.id, expected_execution_id: execution.id, expected_revision: 2, idempotency_key: 'insert' })
+  expect(() => removePersonTaskMessage(1, task.id, { queue_id: selected.execution.id, expected_execution_id: execution.id, expected_revision: 3, idempotency_key: 'remove-selected' })).toThrow('in progress')
+  const result = removePersonTaskMessage(1, task.id, { queue_id: first.execution.id, expected_execution_id: execution.id, expected_revision: 3, idempotency_key: 'remove-first' })
+  expect(result.pending.map(item => item.id)).toEqual([selected.execution.id])
+  expect(result.insertion).toMatchObject({ queueId: selected.execution.id, phase: 'waiting_for_tool_batch' })
+  expect(runtime.stop).not.toHaveBeenCalled()
+})
+
+it('checks account/profile access while removal remains available without a usable model or insertion runtime', async () => {
+  const { continuePersonTask, personTaskChat } = await import('../../packages/server/src/modules/studio/services/person/task-chat')
+  const { removePersonTaskMessage } = await import('../../packages/server/src/modules/studio/services/person/task-queue')
+  const { task, execution } = await create(); store.setPersonExecution(execution, 'running')
+  const followup = await continuePersonTask(1, task.id, { input: [{ type: 'text', text: 'first' }], expected_revision: 0, idempotency_key: 'first' })
+  const request = { queue_id: followup.execution.id, expected_execution_id: execution.id, expected_revision: 1, idempotency_key: 'remove' }
+  activeAccount = false
+  expect(() => removePersonTaskMessage(1, task.id, request)).toThrow()
+  activeAccount = true; catalog = []; installedAgent = false
+  expect((await personTaskChat(1, task.id)).canRemove).toBe(true)
+  expect(removePersonTaskMessage(1, task.id, request).pending).toEqual([])
+  const otherTask = store.createPersonTask(2, 'Other', 'Goal', selection, dir, 'person-main-2')
+  const otherRun = store.enqueuePersonExecution(otherTask)
+  allowedProfiles = []
+  expect(() => removePersonTaskMessage(2, otherTask.id, { queue_id: otherRun.id, expected_execution_id: otherRun.id, expected_revision: 0, idempotency_key: 'other' })).toThrow('permission revoked')
+})
+
+describe('Person task loading reads', () => {
+  function seedRun(taskId: string, id: string, state: string, createdAt: number, sessionId = 'person-task-loading', owner = 1) {
+    db.prepare(`INSERT INTO person_executions(id,task_id,owner_user_id,requirements_revision,state,session_id,selection_json,created_at,updated_at)
+      VALUES (?,?,?,1,?,?,?,?,?)`).run(id, taskId, owner, state, sessionId, JSON.stringify(selection), createdAt, createdAt)
+  }
+
+  it('keeps active/pending/terminal priority, rowid ties, delivery activity and account boundaries', () => {
+    const task = store.createPersonTask(1, 'Priority', 'Check ordering', selection, dir, 'person-main-1')
+    seedRun(task.id, 'active', 'running', 1)
+    seedRun(task.id, 'pending', 'pending', 2)
+    seedRun(task.id, 'finished', 'finished', 3)
+    expect(store.getPersonTask(1, task.id)).toMatchObject({ execution_id: 'active', execution_state: 'running', pending_count: 1, running: 1 })
+    db.prepare("UPDATE person_executions SET state='finished' WHERE id='active'").run()
+    expect(store.getPersonTask(1, task.id).execution_id).toBe('pending')
+    db.prepare("UPDATE person_executions SET state='finished' WHERE id='pending'").run()
+    seedRun(task.id, 'tie', 'failed', 3)
+    expect(store.getPersonTask(1, task.id)).toMatchObject({ execution_id: 'tie', execution_state: 'failed', running: 0 })
+    db.prepare("INSERT INTO person_deliveries(execution_id,owner_user_id,origin_json,state,updated_at) VALUES ('finished',1,'{}','pending',1)").run()
+    expect(store.getPersonTask(1, task.id).running).toBe(1)
+    expect(store.personTaskRunning(task.id)).toBe(true)
+    expect(store.listPersonTasks(1)[0].execution_id).toBe('tie')
+    expect(store.listPersonTasks(2)).toEqual([])
+    expect(() => store.getPersonTask(2, task.id)).toThrow('not found')
+  })
+
+  it('preserves scoped search, status, sorting and offset while using bounded execution lookups', () => {
+    const first = store.createPersonTask(1, 'First needle', 'Search summary', selection, dir, 'person-main-1')
+    const second = store.createPersonTask(1, 'Second', 'Contains NEEDLE', selection, dir, 'person-main-1')
+    store.createPersonTask(2, 'Foreign needle', 'Excluded', selection, dir, 'person-main-2')
+    db.prepare('UPDATE session_tasks SET updated_at=10 WHERE id=?').run(first.id)
+    db.prepare("UPDATE session_tasks SET updated_at=20,status='completed' WHERE id=?").run(second.id)
+    expect(store.listPersonTasks(1, 'needle', 0, { order: 'oldest', limit: 1 }).map(x => x.id)).toEqual([first.id])
+    expect(store.listPersonTasks(1, 'needle', 1, { order: 'oldest', limit: 1 }).map(x => x.id)).toEqual([second.id])
+    expect(store.listPersonTasks(1, 'needle', 0, { status: 'completed' }).map(x => x.id)).toEqual([second.id])
+    expect(store.listPersonTasks(1, '', 0, { sessionId: 'person-main-2' })).toEqual([])
+    const prepare = vi.spyOn(db, 'prepare')
+    store.listPersonTasks(1, '', 0, { sessionId: 'person-main-1' })
+    const sql = prepare.mock.calls.find(([sql]) => sql.startsWith('SELECT t.*'))![0]
+    prepare.mockRestore()
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(1, 'person:1', 'person-main-1', 20, 0).map(x => String(x.detail)).join('\n')
+    expect(plan).toContain('idx_person_session_goals')
+    expect(plan).toContain('idx_person_execution_order')
+    expect(plan).not.toMatch(/SCAN e\b/)
+  })
+
+  it('finds the latest execution in a long conversation without repeated inner sorting', () => {
+    const task = store.createPersonTask(1, 'Long conversation', 'Read latest', selection, dir, 'person-main-1')
+    db.exec('BEGIN')
+    for (let i = 0; i < 1500; i++) seedRun(task.id, `long-${i}`, 'finished', i)
+    seedRun(task.id, 'newest-tie', 'finished', 1499)
+    db.exec('COMMIT')
+    const prepare = vi.spyOn(db, 'prepare')
+    expect(store.taskPersonConversations(1, task.id).map(x => x.id)).toEqual(['newest-tie'])
+    const sql = prepare.mock.calls.find(([sql]) => sql.startsWith('SELECT id,session_id,state,created_at,occurrence_id FROM person_executions e'))![0]
+    prepare.mockRestore()
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(1, task.id).map(x => String(x.detail)).join('\n')
+    expect(plan).toContain('idx_person_conversation_latest')
+    expect(plan).not.toContain('USE TEMP B-TREE FOR ORDER BY')
+    expect(() => store.taskPersonConversations(2, task.id)).toThrow('not found')
+  })
+
+  it('reads an effective snapshot with SQLite writes disabled and synchronizes only changed run metadata', async () => {
+    const { personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
+    const { ensurePersonSession } = await import('../../packages/server/src/modules/studio/services/person/chat-agent')
+    const current = store.personSettings(1, 'person-main-1')
+    store.savePersonSettings(1, current.settings, current.revision, undefined, 'person-main-1')
+    db.prepare("UPDATE sessions SET model='old',provider='old',workspace='/old' WHERE id='person-main-1'").run()
+    const stored = db.prepare("SELECT * FROM sessions WHERE id='person-main-1'").get()
+    const changes = () => Number(db.prepare('SELECT total_changes() AS n').get()!.n)
+    const before = changes()
+    db.exec('PRAGMA query_only=ON')
+    try {
+      const snapshot = await personSnapshot(1, 'person-main-1')
+      expect(snapshot.session).toMatchObject({ model: 'm', provider: 'test', workspace: dir })
+      expect(db.prepare("SELECT * FROM sessions WHERE id='person-main-1'").get()).toEqual(stored)
+      expect(changes()).toBe(before)
+    } finally { db.exec('PRAGMA query_only=OFF') }
+    await ensurePersonSession(1, 'person-main-1')
+    expect(db.prepare("SELECT model,workspace FROM sessions WHERE id='person-main-1'").get()).toMatchObject({ model: 'm', workspace: dir })
+    const synchronized = changes()
+    await ensurePersonSession(1, 'person-main-1')
+    expect(changes()).toBe(synchronized)
+  })
+
+  it('keeps running-session metadata in a snapshot without changing or reconfiguring it', async () => {
+    const { personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
+    db.prepare("UPDATE sessions SET model='running-model',workspace='/running' WHERE id='person-main-1'").run()
+    mainBusy = 'person-main-1'
+    expect((await personSnapshot(1, 'person-main-1')).session).toMatchObject({ model: 'running-model', workspace: '/running' })
+  })
+})
+
+
+describe('Person protocol selection', () => {
+  it.each(['codex', 'claude-code', 'ekko'])('retains automatic relay protocols through task execution for %s', async runtimeId => {
+    const { createCatalogModelMetadataEnricher } = await import('../../packages/server/src/modules/hermes/services/models/metadata')
+    const models = ['gpt-6.1-sol', 'claude-opus-4-6']
+    catalog = createCatalogModelMetadataEnricher()([{ provider: 'custom:relay', base_url: 'https://relay.example.test', models }])
+    const agents = models.map((model, index) => ({ id: `worker-${index}`, name: model, description: 'Execute tasks', selection: {
+      ...selection, runtime: runtimeId, provider: 'custom:relay', model, apiMode: undefined, reasoningEffort: '',
+    } }))
+    const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+    await configurePerson(1, { agents, expected_revision: 1 })
+    for (const [index, agent] of agents.entries()) {
+      const expected = index ? 'anthropic_messages' : 'codex_responses'
+      const { task, execution } = await create({ agent_id: agent.id })
+      expect(JSON.parse(task.selection_json).apiMode).toBe(expected)
+      await runner.tickPersonWork(); await wait(execution.id, 'finished')
+      expect(vi.mocked(runtime.execute).mock.calls.at(-1)?.[0].selection.apiMode).toBe(expected)
+    }
+  })
+
+  it.each(['codex', 'claude-code', 'ekko'])('persists independent GPT and Opus protocols for %s through execution', async runtimeId => {
+    catalog[0].models = ['gpt', 'opus']
+    const agents = ['gpt', 'opus'].map(model => ({ id: model, name: model, description: 'Execute tasks', selection: {
+      ...selection, runtime: runtimeId, model, apiMode: model === 'gpt' ? 'codex_responses' : 'anthropic_messages', reasoningEffort: '',
+    } }))
+    const { configurePerson } = await import('../../packages/server/src/modules/studio/services/person/service')
+    await configurePerson(1, { agents, expected_revision: 1 })
+    expect(store.personSettings(1).settings.agents).toEqual(agents)
+    for (const agent of agents) {
+      const { task, execution } = await create({ agent_id: agent.id })
+      expect(JSON.parse(task.selection_json)).toEqual(agent.selection)
+      await runner.tickPersonWork(); await wait(execution.id, 'finished')
+      expect(vi.mocked(runtime.execute).mock.calls.at(-1)?.[0].selection).toEqual(agent.selection)
+    }
+  })
+
+  it('persists a conversation protocol independently of the provider default', async () => {
+    const { configurePerson, personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
+    await configurePerson(1, { session_id: 'person-main-1', model: { ...selection, apiMode: 'anthropic_messages' }, expected_revision: 1 })
+    expect((await personSnapshot(1, 'person-main-1')).settings.model?.apiMode).toBe('anthropic_messages')
+    const { validatePersonSelection } = await import('../../packages/server/src/modules/studio/services/person/catalog')
+    await expect(validatePersonSelection(1, store.personSettings(1, 'person-main-1').settings.model!)).resolves.toBeUndefined()
+  })
+
+  it('preserves the selected protocol when creating a BOT and follows defaults on reset', async () => {
+    const { createPersonConversation } = await import('../../packages/server/src/modules/studio/services/person/conversations')
+    const { configurePerson, personSnapshot } = await import('../../packages/server/src/modules/studio/services/person/service')
+    const session = await createPersonConversation(1, 'Protocol BOT', { workspace: dir, model: { ...selection, apiMode: 'codex_responses' } })
+    expect((await personSnapshot(1, session.id)).settings.model?.apiMode).toBe('codex_responses')
+    await configurePerson(1, { session_id: session.id, use_global_default: true, expected_revision: store.personSettings(1).revision })
+    expect((await personSnapshot(1, session.id)).settings.model?.apiMode).toBe('chat_completions')
+  })
+
+  it.each(['invented', 'bedrock_converse', 'codex_app_server', 42])('rejects unsupported protocol %s rather than silently replacing it', async apiMode => {
+    const { validatePersonAgents } = await import('../../packages/server/src/modules/studio/services/person/agents')
+    await expect(validatePersonAgents(1, [{ id: 'worker', name: 'Worker', description: 'Tasks', selection: { ...selection, runtime: 'codex', apiMode } }])).rejects.toMatchObject({ status: 400 })
+  })
+
+  it('keeps catalog defaults for older clients and Hermes protocol ownership', async () => {
+    const { validatePersonAgents } = await import('../../packages/server/src/modules/studio/services/person/agents')
+    const preset = { id: 'worker', name: 'Worker', description: 'Tasks', selection: { ...selection, runtime: 'codex', apiMode: undefined } }
+    expect((await validatePersonAgents(1, [preset]))[0].selection.apiMode).toBe('chat_completions')
+    await expect(validatePersonAgents(1, [{ ...preset, selection: { ...selection, runtime: 'hermes', apiMode: 'anthropic_messages' } }])).rejects.toMatchObject({ status: 409 })
+    catalog[0].model_meta = { m: { disabled: true } }
+    await expect(validatePersonAgents(1, [preset])).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('preserves native-only Hermes protocols and rejects converting them into coding connections', async () => {
+    const { personSelectionApiMode } = await import('../../packages/server/src/modules/studio/services/person/catalog')
+    const group = { provider: 'bedrock', api_mode: 'bedrock_converse' }
+    expect(personSelectionApiMode(group, 'm', 'bedrock_converse', 'hermes')).toBe('bedrock_converse')
+    expect(() => personSelectionApiMode(group, 'm', 'anthropic_messages', 'codex')).toThrow('protocol')
+    expect(() => personSelectionApiMode({ provider: 'claude-oauth', api_mode: 'anthropic_messages' }, 'm', 'codex_responses')).toThrow('protocol')
   })
 })

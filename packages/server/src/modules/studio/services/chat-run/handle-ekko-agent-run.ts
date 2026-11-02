@@ -1,9 +1,11 @@
+import { createPersonDisplayStream } from './person-display'
 import { studioModelReasoningEffort } from '../../public/model-reasoning-effort'
 import { personBackgroundPendingCount } from '../../repositories/person-store'
 import { isPersonSession, isPrivatePersonSession } from '../../contracts/person-session'
 import { finishPersonStageTurn } from '../person/stage-flows'
 import type { PersonStageContext } from '../../contracts/person-stage'
 import { createPersonChatAgent } from '../person/chat-agent'
+import { requirePersonWorkspace } from '../person/workspace'
 import { studioSessionAccount } from '../../contracts/runs/usage'
 import { completeRunUsage } from '../../repositories/run-usage-store'
 import { studioMcpUsageGuidelines } from '../../public/runs/prompt'
@@ -514,13 +516,14 @@ export async function handleEkkoAgentRun(
   const personStageContext = 'personStageContext' in agent ? agent.personStageContext as PersonStageContext : undefined
   state.ekkoBoundaryInterrupt = agent.requestBoundaryInterrupt
     ? (expectedRunId: string) => agent.requestBoundaryInterrupt({ sessionId, expectedRunId }) : undefined
-  const workspace = selectWorkspace(
+  const workspace = isPersonSession(sessionId) ? agent.sessionWorkspaceDirectory(sessionId) : selectWorkspace(
     data.workspace,
     storedSession?.workspace,
     () => agent.sessionWorkspaceDirectory(sessionId),
   )
   const shouldEmitWorkspaceUpdate = Boolean(workspace && !storedSession?.workspace)
   if (storedSession && !storedSession.workspace) updateSession(sessionId, { workspace })
+  if (isPersonSession(sessionId) && storedSession?.workspace !== workspace) updateSession(sessionId, { workspace })
   const displayInput = data.display_input === undefined ? data.input : data.display_input
   const inputText = contentBlocksToString(data.input)
   const displayText = displayInput == null ? '' : contentBlocksToString(displayInput)
@@ -542,15 +545,18 @@ export async function handleEkkoAgentRun(
       : data.session_source === 'workflow' || data.source === 'workflow'
         ? 'workflow'
         : 'builtin_agent'
+  const projectDisplayEvent = createPersonDisplayStream(sessionId)
   const emit = (event: string, payload: any) => {
     const tagged = { ...payload, session_id: sessionId }
     if (personStageContext && (event === 'run.completed' || event === 'run.failed')) {
-      finishPersonStageTurn(Number(authenticatedUserId),personStageContext,String(payload.run_id || ''),payload.message_id || payload.run_usage?.assistantMessageId,event === 'run.completed')
+      finishPersonStageTurn(Number(authenticatedUserId),personStageContext,String(payload.run_id || ''),payload.message_id || payload.run_usage?.assistantMessageId,event === 'run.completed',String(payload.error || ''))
     }
     if (!isPrivatePersonSession(sessionId)) observeRunChatPetEvent(profile, event, tagged)
     data.onEvent?.(event, tagged)
     appendStateEvent(state, event, tagged)
-    const outbound = buildOutboundRunEvent(event, tagged)
+    const display = projectDisplayEvent(event, tagged)
+    if (display === null) return
+    const outbound = buildOutboundRunEvent(event, display)
     nsp.to(`session:${sessionId}`).emit(event, outbound)
     if (!data.onEvent && !nsp.adapter.rooms.get(`session:${sessionId}`)?.size && socket.connected) {
       socket.emit(event, outbound)
@@ -646,6 +652,7 @@ export async function handleEkkoAgentRun(
         role,
         content: storageText,
         timestamp: now,
+        queued: false,
       },
     })
   }
@@ -666,7 +673,8 @@ export async function handleEkkoAgentRun(
   })
   const modelClient = createProviderModelClient(createModelClient(providerConfig, { fetch: authorizedProviderFetch }), {
     providerConfig,
-    fallback: fallbackProviderConfig
+    // BOT selections pin the upstream protocol, including delegated Ekko tasks.
+    fallback: fallbackProviderConfig && !isPrivatePersonSession(sessionId)
       ? {
           client: createModelClient(fallbackProviderConfig, { fetch: authorizedProviderFetch }),
           providerConfig: fallbackProviderConfig,
@@ -954,6 +962,10 @@ export async function handleEkkoAgentRun(
   const mcpBackgroundTasks = new Set<string>()
   const releaseIdleMcp = () => { if (foregroundEnded && !mcpBackgroundTasks.size) releaseMcp() }
   const handleRuntimeEvent = (event: AgentRuntimeEvent) => {
+    if (isPrivatePersonSession(sessionId) && ['run.started', 'model.started', 'tool.started'].includes(event.type)) {
+      try { requirePersonWorkspace(workspace) }
+      catch (error) { abortController.abort(error); throw error }
+    }
     if (event.type === 'subagent.start' && event.background) mcpBackgroundTasks.add(event.subagentId)
     if (event.type === 'subagent.complete' && event.background) {
       mcpBackgroundTasks.delete(event.subagentId)
@@ -969,6 +981,7 @@ export async function handleEkkoAgentRun(
         model: modelConfig.model,
         provider: modelConfig.provider,
         queue_id: data.queue_id,
+        queue_length: state.queue.length,
         autonomous: data.autonomous === true,
         delegation_id: data.background_delegation_id,
       })
@@ -1349,6 +1362,7 @@ export async function handleEkkoAgentRun(
         }
         return waitForEkkoToolApproval(request, {
           sessionId,
+          runId: runId || turnId,
           signal: abortController.signal,
           onRequested: (pending: any) => {
             const requestedAt = Date.now()
@@ -1691,6 +1705,8 @@ export async function handleEkkoAgentRun(
       message_id: assistantMessageId || undefined,
       output: assistantText,
       context: result.context,
+      interrupted: boundaryInterrupted,
+      boundary_interrupt: boundaryInterrupted,
       contextTokens: contextEstimate?.contextTokens,
       context_tokens: contextEstimate?.contextTokens,
       contextEstimate,
