@@ -115,6 +115,15 @@ export function classifyCronExecution(execution: CronObservedExecution): {
   }
 }
 
+/** The same binding row as observed earlier; every (re)binding writes a strictly later `bound_at`. */
+function sameBindingRevision(observed: CronSessionBinding, current: CronSessionBinding | undefined): boolean {
+  return Boolean(current)
+    && current!.bound_at === observed.bound_at
+    && current!.session_id === observed.session_id
+    && current!.session_generation === observed.session_generation
+    && current!.stored_deliver === observed.stored_deliver
+}
+
 /** One observation pass over every active binding of this Studio instance. */
 export async function observeCronBindings(deps: CronObserverDeps): Promise<SessionNotificationRecord[]> {
   const bindings = readCronSessionBindings(deps.bindingsPath, deps.namespace)
@@ -131,7 +140,13 @@ export async function observeCronBindings(deps: CronObserverDeps): Promise<Sessi
       const before = cronJobObserveCursor(deps.namespace, profile, binding.job_id)
       return { job_id: binding.job_id, since: binding.bound_at - 1, ...(before ? { before } : {}) }
     }))
-    const byJob = new Map(profileBindings.map(binding => [binding.job_id, binding]))
+    // A binding replaced while Hermes answered owns the job now: drop this stale answer for it.
+    const live = new Map(readCronSessionBindings(deps.bindingsPath, deps.namespace)
+      .filter(binding => binding.profile === profile)
+      .map(binding => [binding.job_id, binding]))
+    const byJob = new Map(profileBindings
+      .filter(binding => sameBindingRevision(binding, live.get(binding.job_id)))
+      .map(binding => [binding.job_id, binding]))
     const changedTargets = new Set<string>()
     for (const job of response.jobs || []) {
       const binding = byJob.get(job.job_id)

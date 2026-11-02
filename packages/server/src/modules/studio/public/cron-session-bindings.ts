@@ -51,9 +51,13 @@ export function writeCronSessionBinding(input: { profile: string; jobId: string;
     db.exec(CRON_BINDINGS_SCHEMA)
     const columns = new Set((db.prepare('PRAGMA table_info(cron_session_bindings)').all() as Array<{ name: string }>).map(column => column.name))
     if (!columns.has('session_generation')) db.exec('ALTER TABLE cron_session_bindings ADD COLUMN session_generation TEXT')
+    // `bound_at` is the binding revision the observer fences on, so a rebinding always moves it forward.
+    const previous = db.prepare('SELECT bound_at FROM cron_session_bindings WHERE instance_id=? AND profile=? AND job_id=?')
+      .get(studioInstanceId(), input.profile, input.jobId) as { bound_at: number } | undefined
+    const boundAt = Math.max(Date.now() / 1000, previous ? Number(previous.bound_at) + 0.001 : 0)
     db.prepare(`INSERT OR REPLACE INTO cron_session_bindings (instance_id, profile, job_id, session_id, bound_at,
         requested_deliver, stored_deliver, requested_paused, session_generation) VALUES (?, ?, ?, ?, ?, NULL, ?, 0, ?)`)
-      .run(studioInstanceId(), input.profile, input.jobId, input.sessionId, Date.now() / 1000, input.storedDeliver, input.generation)
+      .run(studioInstanceId(), input.profile, input.jobId, input.sessionId, boundAt, input.storedDeliver, input.generation)
   } finally {
     db.close()
   }

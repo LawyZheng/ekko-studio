@@ -103,7 +103,36 @@ describe('explicit cron session binding', () => {
     expect(observed).toEqual(['agent1'])
   })
 
-    it('requires a login token and fences the destination', async () => {
+  it.each(['changed-target', 'missing-job'])('an older in-flight %s answer does not stop the replacement binding', async (scenario) => {
+    expect((await bind('agent1')).status).toBe(201)
+    const namespace = m.notifications.studioInstanceId()
+    const { observeCronBindings } = await import(`${STUDIO}/services/session-notifications/cron-observer`)
+    const published: any[] = []
+    const deps = {
+      namespace, bindingsPath: m.notifications.cronBindingsDbPath(),
+      getSession: () => ({ profile: 'default', generation: m.store.getSessionGeneration('chat-1') }),
+      publish: (record: any) => published.push(record),
+    }
+    let release!: (response: any) => void
+    const pending = observeCronBindings({ ...deps, observe: () => new Promise<any>(resolve => { release = resolve }) } as any)
+    // Possibly within the same millisecond as the first binding: the revision still moves forward.
+    expect((await bind('agent1')).status).toBe(201)
+    release({ jobs: [scenario === 'changed-target'
+      ? { job_id: 'agent1', state: 'present', deliver: 'slack:old', older_before: '2026-11-01T00:00:00' }
+      : { job_id: 'agent1', state: 'missing' }], executions: [] })
+    await pending
+    expect(m.inbox.cronJobObservationState(namespace, 'default', 'agent1')).toBe('observing')
+    expect(m.inbox.cronJobObserveCursor(namespace, 'default', 'agent1')).toBeNull()
+    const next = vi.fn(async () => ({ jobs: [{ job_id: 'agent1', state: 'present', deliver: 'local' }], executions: [{
+      job_id: 'agent1', execution_id: 'after-rebind', source: 'builtin', status: 'ok', no_agent: false,
+      receipt: 'exact', success: true, answer: 'fresh result',
+    }] }))
+    await observeCronBindings({ ...deps, observe: next } as any)
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(published).toEqual([expect.objectContaining({ session_id: 'chat-1', disposition: 'notified' })])
+  })
+
+  it('requires a login token and fences the destination', async () => {
     expect((await bind('agent1', users.member.modelRun)).status).toBe(403)
     expect((await bind('agent1', users.outsider.token)).status).toBe(403)
     expect((await bind('agent1', users.member.token, { expected_session_generation: 'stale' })).body.error).toBe('session_generation_mismatch')
