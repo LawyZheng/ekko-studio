@@ -1,7 +1,7 @@
 import { personError, personRevision, personText } from '../../contracts/person'
 import type { ContentBlock } from '../../contracts/runs/session'
 import type { PersonExecution, PersonTask, PersonTaskOrigin } from '../../contracts/person'
-import { getPersonTask, getPersonExecution, taskPersonConversations, personDb, personOperation, personTaskRunning, enqueuePersonExecution, replayPersonOperation, pendingPersonInputs } from '../../repositories/person-store'
+import { getPersonTask, getPersonExecution, taskPersonConversations, personDb, personOperation, enqueuePersonExecution, replayPersonOperation, pendingPersonInputs } from '../../repositories/person-store'
 import { getSession } from '../../repositories/session-store'
 import { personUpdated } from '../../repositories/person-updates'
 import { personUser, validatePersonSelection } from './catalog'
@@ -10,6 +10,7 @@ import { requirePersonSession } from '../../repositories/person-session-store'
 import { personRequirements } from '../../contracts/person-flow'
 import { assertPersonTaskActor } from './task-flow'
 import { assertPersonStage, assertPersonStageTask } from '../../repositories/person-stage-store'
+import { personTaskQueue } from './task-queue'
 
 /** Hidden task conversations are account-owned, never shared by Profile. */
 export function ownedPersonTaskSession(userId: number | undefined, sessionId: string) {
@@ -41,7 +42,7 @@ export async function personTaskChat(userId: number, taskId: string, executionId
   if (current && !executions.some(run => run.id === current.id)) executions.unshift(current)
   // Include a selected older conversation even when it falls outside the recent page.
   if (execution && !executions.some(run => run.session_id === execution.session_id)) executions.push(execution)
-  return { task: { ...task, running: personTaskRunning(taskId) }, session, execution: execution || null, executions, pending: pendingPersonInputs(userId, taskId, session?.id) }
+  return { task: { ...task, running: !!task.running }, session, execution: execution || null, executions, pending: pendingPersonInputs(userId, taskId, session?.id), ...personTaskQueue(userId, taskId, session?.id || '') }
 }
 
 function chatInput(value: unknown): ContentBlock[] {
@@ -63,7 +64,13 @@ export async function continuePersonTask(userId: number, taskId: string, body: R
   const task = getPersonTask(userId, taskId)
   await validatePersonSelection(userId, JSON.parse(task.selection_json))
   const replay = replayPersonOperation<{ task: PersonTask; execution: PersonExecution; pending: ReturnType<typeof pendingPersonInputs> }>(userId, key, request)
-  if (replay !== undefined) return replay
+  if (replay !== undefined) {
+    // The input was accepted once, but may since have finished or been cancelled
+    // by pause/stop. Return its current receipt instead of a stale "running" one.
+    const execution = getPersonExecution(userId, replay.execution.id)
+    const current = getPersonTask(userId, taskId)
+    return { task: { ...current, running: !!current.running }, execution, pending: pendingPersonInputs(userId, taskId, execution.session_id) }
+  }
   const input = chatInput(body.input)
   const result = personOperation(userId, key, request, () => {
     const stage = assertPersonStageTask(userId,taskId)

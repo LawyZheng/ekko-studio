@@ -41,6 +41,7 @@ export interface PersonSettings {
   compressionThreshold: number | null
   agents: PersonAgentPreset[]
   maxConcurrentTasks: number
+  taskTimeoutMinutes: number
 }
 export interface PersonTask {
   id: string
@@ -62,14 +63,18 @@ export interface PersonTask {
   updated_at: number
   running?: boolean | number
   execution_id?: string | null
+  execution_selection_json?: string | null
   execution_state?: PersonRunState | 'idle'
   pending_count?: number
 }
 export interface PersonExecution {
+  /** Fixed at admission; Bot settings and role transfers never rewrite this path. */
+  workspace: string
   id: string; task_id: string; owner_user_id: number; requirements_revision: number
   state: PersonRunState; input_json: string; session_id: string; selection_json: string; output: string
   error: string; generation: number
   lease_until: number; created_at: number; updated_at: number; occurrence_id: string | null
+  queue_priority?: number; insertion_queue_id?: string; insertion_phase?: string; insertion_error?: string
 }
 export interface PersonInteraction {
   id: string; owner_user_id: number; task_id: string; execution_id: string
@@ -85,7 +90,7 @@ export interface PersonSchedule {
 }
 export const PERSON_DEFAULTS: PersonSettings = {
   model: null, reasoningEffort: '', timezone: 'Asia/Shanghai', maxSteps: 12,
-  agents: [], maxConcurrentTasks: 2, compressionThreshold: null, workspace: '',
+  agents: [], maxConcurrentTasks: 6, taskTimeoutMinutes: 60, compressionThreshold: null, workspace: '',
 }
 export function personError(message: string, status = 400): Error & { status: number } {
   return Object.assign(new Error(message), { status })

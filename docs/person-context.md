@@ -25,9 +25,63 @@ Memory, Agent presets and execution settings remain account-scoped. Each main tu
 
 Every Person task has a required owning `session_tasks.session_id`. A model can create or adopt background work only in its current conversation; cross-role attempts fail with `ROLE_HANDOFF_REQUIRED` before Agent selection or task creation. Use `bot_flow_create` to let another role receive the request in its main conversation and choose its own execution needs. Continuing an existing task preserves its task, runtime conversation and owner. Existing legacy planned task flows can still transfer ownership using `advance`. The task's current owning conversation is authoritative for result delivery, even when another conversation supplied the follow-up instruction. Durable questions and completion links also target that conversation. Task and schedule drawers are filtered to the selected conversation.
 
+### Bot workspaces
+
+Creating a Bot requires selecting an existing, absolute directory. Its default is
+stored with its model/effort in `person_conversation_settings`, requires an owned
+`session_id` to change, and never changes another Bot's default. The directory
+picker can create a directory explicitly; execution never creates a missing one.
+The server checks directory type and read/write/search access and canonicalizes
+the selected path. A missing or inaccessible binding fails with
+`WORKSPACE_UNAVAILABLE`; no account, process cwd or HOME fallback is permitted.
+
+New tasks and adopted goals pin the initiating turn's effective directory in
+`session_tasks.workspace`. Each execution also snapshots it in
+`person_executions.workspace`. Follow-ups, scheduled worker occurrences and legacy
+role transfers keep their project's directory. Editing a Bot's default affects
+new work and is allowed while background work runs; the current main reply must
+finish before editing. Historical artifact reads use the execution snapshot.
+
+A conversation flow pins the initiating turn's directory in `person_flows.workspace`.
+Every serial/parallel recipient and its workers uses that directory, including
+worker result callbacks. A flow created from a task result inherits that result's
+execution directory. Scheduled main-role stages select the Bot's current default
+when the occurrence is created. Users and models do not supply a collaboration
+workspace argument. A recipient's own default remains unchanged, and concurrent
+flows keep separate bindings even when they address the same recipient. The chat
+runtime serializes turns for a given main Bot session; parallel workers can still
+write concurrently to a shared directory.
+
+At startup an atomic, idempotent migration records existing Bots' prior session
+workspace (then legacy account/default binding), preserving local model/effort.
+It snapshots old executions from their child session or task, and old flows from
+their creator. Files are not moved or copied. Old Bots can therefore initially
+share the same legacy directory until their defaults are individually edited.
+Unrecoverable historical bindings remain empty and fail explicitly when executed.
+Clients creating Bots must now send `workspace`; workspace setting writes must
+include `session_id`. Unscoped shared Agent/timezone/quota settings remain supported.
+
+The host injects the active directory into Runtime Context/tool configuration for
+Ekko main/worker/coordinator runs and into external worker instructions plus cwd.
+Other Bots' default paths are not added to the role directory. Existing history,
+user messages and artifact contents can still contain paths. Summaries are context
+processing and do not gain filesystem tools. Directory checks run at admission,
+model/tool boundaries where supported and worker lease heartbeats. Native workers
+must retain a valid cwd on initial/resumed launches; Hermes Person workers require
+session cwd binding support and fail explicitly on incompatible runtimes.
+
+These bindings are **not a security sandbox**. They do not confine filesystem
+access, isolate account memory/history, implement per-Bot OS permissions, or lock
+shared files/Git operations. Native tool approval modes and runtime permissions
+remain as configured; an external process can access other paths allowed by the
+server's OS user. Running native tools can outlive a directory change until an
+abort is observed; the heartbeat interval is 15 seconds. The human terminal UI
+still uses its terminal configuration. Use independent OS/container permissions
+for hard isolation, and coordinate shared file changes at the task level.
+
 ### Conversation stages and optional workers
 
-Use `bot_flow_create` for a fixed sequence of roles, including a single stage to relay a message to one recipient. Praise, greetings and word games are conversation, not background execution. Flows and stages are separate from background tasks: a stage can answer directly with zero executions, or choose its own configured Agent using `bot_agents_list` and `bot_task_create`. Main chat and pure dialogue stages need an available interaction model, but no execution Agent preset. New task tools no longer advertise the legacy `next_steps` contract; existing legacy task flows retain their compatibility path.
+Use `bot_flow_create` for fixed serial and parallel groups of roles, including a single stage to relay a message to one recipient. Praise, greetings and word games are conversation, not background execution. Flows and stages are separate from background tasks: a stage can answer directly with zero executions, or choose its own configured Agent using `bot_agents_list` and `bot_task_create`. Main chat and pure dialogue stages need an available interaction model, but no execution Agent preset. New task tools no longer advertise the legacy `next_steps` contract; existing legacy task flows retain their compatibility path.
 
 ```json
 {
@@ -41,17 +95,35 @@ Use `bot_flow_create` for a fixed sequence of roles, including a single stage to
 }
 ```
 
-The host fixes the creator from the originating conversation. Route data is immutable and bounded to 13 stages and 32,000 characters. Each stage first wakes its owning Person main conversation. An outstanding handoff lights its current recipient, even without a worker; the creator waiting for other roles and future recipients remain idle unless they have their own foreground or background work. Settled or failed deliveries do not leave a role lit just because its stage remains active. Internal handoff instructions do not count as unread. Replies and the creator's final completion notice become unread only after execution settles; reading during execution cannot consume the partial reply. Socket receipts acknowledge observed message and completion-notice cursors across devices. Any optional worker gets a distinct task and hidden worker conversation; continuing that child preserves its Agent and conversation. Ownership never moves from one stage to another. Stage children cannot be scheduled for later recurrence.
+For A and B to work concurrently and C to summarize both results, use:
 
-The directory entry marked `current:true` is the speaking role. A request naming that role is its own work. The service rejects a first destination equal to the creator and any consecutive equal destinations with `SELF_HANDOFF`, before persisting a flow or delivery. Comparisons use session IDs, not names; a later return after another role remains valid. Finish local work before handing its artifact to another role: a pending worker created in the same turn blocks flow creation with `WORK_PENDING`. For “programmer makes HTML, then copywriter reviews” inside the programmer conversation, the programmer starts its own worker once, waits for the artifact, then sends only the review to the copywriter. Worker result callbacks may continue handoffs already requested by the user; they do not authorize new work.
+```json
+{
+  "title": "Research and summarize",
+  "goal": "Combine competitor research and user needs into a proposal",
+  "stages": [
+    { "session_id": "person-main-a", "group": 0, "goal": "Research competitors", "return_expectation": "Save findings and sources" },
+    { "session_id": "person-main-b", "group": 0, "goal": "Analyze user needs", "return_expectation": "Save findings and evidence" },
+    { "session_id": "person-main-c", "group": 1, "goal": "Summarize both research results", "return_expectation": "Write the combined proposal" }
+  ]
+}
+```
 
-`bot_flows_query` returns fresh revision-bound references. `bot_flow_control complete` prepares the active stage; it cannot complete another stage or leave unfinished workers. The host advances only after the final assistant result from that same run is successfully saved. Normal replies and worker completion alone do not advance a flow. Result references, the next active stage and its durable delivery record are committed together. Startup recovery reconciles a saved final result with an unfinished completion marker without repeating advancement. Failed, streamed, interrupted or truncated replies are not final stage results.
+A single parallel group needs no synthetic summary stage: each role replies independently and the flow finishes when all results are saved. Planning is done by the conversation Bot through the tool; dispatch, joining, fencing and recovery belong to the host.
 
-Handoff instructions are transient model context (`displayInput: null`, no user-message write, no memory writes). Stages store original result message IDs, not copied output text. The next stage loads the previous result by reference, with a bounded excerpt and the original ID for further reads; the same ID is excluded from normal recalled evidence in that turn. Shared account recall remains available. For an idiom chain, history stores A, B and C once in their respective role conversations, without storing A→B or B→C handoff messages. Optional worker callbacks retain no copied originating transcript for stage tasks.
+The host fixes the creator from the originating conversation. Route data is immutable and bounded to 13 role stages and 32,000 characters. Omit `group` on every stage for a serial route. For mixed execution, set `group` on every stage to ordered, contiguous integers starting at zero. Roles in the same group run independently; every result must be saved before the next group is dispatched. A role may appear only once per group. Each stage first wakes its owning Person main conversation. Outstanding handoffs light all current recipients, even without workers; a creator waiting for other roles and future recipients remain idle unless they have their own foreground or background work. Settled or failed deliveries do not leave a role lit just because its stage remains active. Internal handoff instructions do not count as unread. Replies and the creator's final completion notice become unread only after execution settles; reading during execution cannot consume the partial reply. Socket receipts acknowledge observed message and completion-notice cursors across devices. Any optional worker gets a distinct task and hidden worker conversation; continuing that child preserves its Agent and conversation. Ownership never moves from one stage to another. Stage children cannot be scheduled for later recurrence.
 
-The creator or current role can stop a flow. Stop cancels durable handoffs and worker callbacks, aborts only flow-tagged main turns and stops its child work. Other ordinary turns in those conversations keep their normal behavior. Late callbacks are fenced by the flow generation. Only the creator or authenticated account API can resume a stopped flow; this increments the generation and requeues the same stage after workers finish stopping. Replaying an old stop request cannot stop a resumed flow.
+The directory entry marked `current:true` is the speaking role. A request naming that role is its own work. The service rejects a creator-only first group and consecutive singleton groups for the same role with `SELF_HANDOFF`, before persisting a flow or delivery. A first parallel group may include the creator alongside other roles, which supports “everyone introduce yourself”. The creating turn acknowledges dispatch and ends; its own introduction is produced only by its assigned stage turn. Comparisons use session IDs, not names; returning in a later group remains valid. Finish local work before handing its artifact to another role: a pending worker created in the same turn blocks flow creation with `WORK_PENDING`. For “programmer makes HTML, then copywriter reviews” inside the programmer conversation, the programmer starts its own worker once, waits for the artifact, then sends only the review to the copywriter. Worker result callbacks may continue handoffs already requested by the user; they do not authorize new work.
 
-The Person settings drawer includes a flow panel with stage status, result links, optional child conversations, and stop/resume controls. The account API exposes `/api/studio/person/flows/query` and `/flows/apply`. Completion is restricted to the trusted assigned model turn and cannot be forged through that API. Deleting any involved conversation stops its active flows; clearing history is blocked while an involved flow remains active. Missing original results leave a visible delivery error instead of silently reconstructing lost context.
+`bot_flows_query` returns fresh revision-bound references. `bot_flow_control complete` prepares the active stage; it cannot complete another stage or leave unfinished workers. The host completes a branch only after the final assistant result from that same run is successfully saved. Normal replies and worker completion alone do not advance a flow. The last completed branch atomically activates every role in the next group and inserts their durable deliveries, so duplicate callbacks cannot wake a downstream role twice. Each completion changes the flow revision, but an assigned branch may complete using its already observed reference when peers advance that shared revision. The host validates its exact stage, generation, active group and live run; stop/resume still require the current flow revision. Peer completions never force model retries or share another role’s step budget. Startup recovery reconciles a saved final result with an unfinished completion marker without repeating advancement. Failed, streamed, interrupted or truncated replies are not final stage results.
+
+Handoff instructions are transient model context (`displayInput: null`, no user-message write, no memory writes). Stages store original result message IDs, not copied output text. Each role in the next group loads all previous-group results by reference, sharing a 6,000-character inline budget and keeping every original ID for further reads. Those IDs are excluded from normal recalled evidence in that turn. Peers do not consume each other’s partial results. A missing upstream result blocks delivery with a visible error rather than omitting that branch. Shared account recall remains available. For an idiom chain, history stores A, B and C once in their respective role conversations, without storing A→B or B→C handoff messages. Optional worker callbacks retain no copied originating transcript for stage tasks.
+
+The creator or current role can stop a flow. Stop cancels durable handoffs and worker callbacks, aborts only flow-tagged main turns and stops its child work. Other ordinary turns in those conversations keep their normal behavior. Late callbacks are fenced by the flow generation. Only the creator or authenticated account API can resume a stopped or failed flow; this increments the generation and requeues only unfinished branches after all their workers finish stopping. Completed branches and their saved results remain intact. Replaying an old stop request cannot stop a resumed flow.
+
+A failed handoff, assigned role turn or stage-worker result callback automatically marks that branch and flow failed, settles its deliveries and stops only its own remaining workers. It preserves messages, original results, task records and error details. Parallel peers retain their generation and can finish normally; dependent groups stay pending. Failed deliveries do not retry on a timer or require the user to clear history to release a role. Resume is explicit and waits for live peers and worker shutdown before requeuing unfinished branches. History checks continue to protect actual live work and upstream results currently in use, while an idle failed flow holds no lock. Workspace defaults can change independently because flows and tasks retain their pinned roots. Startup recovery also settles legacy errored handoffs that older versions left pending. The drawer displays failed flows with their error and Resume action.
+
+The Person settings drawer defaults to a compact list of at most the 50 most recently updated flows for the selected conversation, with status filters, title/goal/role search, completion counts and a short route (`A ∥ B → C`). Search and status counts apply to those same 50 flows. Older flows remain saved and available through offset-based API queries. Only one flow can be expanded at a time; filtering out the selected flow closes its detail. Expanding reveals the role collaboration graph: parallel role cards sit side by side on desktop, serial groups are connected through a handoff, and phones stack roles inside a labeled parallel group. Each card shows the saved Bot appearance, role goal and status, opens its conversation, and links to original results. Background workers are collapsed under their owning role with their actual execution states and Agent logos. Pending roles name their unfinished upstream dependencies instead of appearing to be queued for execution. Saved completions remain completed while their peers work; delivery errors and failed open workers require attention, and settled unfinished role turns show that a follow-up is pending. The header counts completed roles and retains stop/resume controls. The account API exposes `/api/studio/person/flows/query` and `/flows/apply`. Completion is restricted to the trusted assigned model turn and cannot be forged through that API. Deleting any involved conversation stops its active flows; clearing history is blocked while an involved flow remains active. Missing original results leave a visible delivery error instead of silently reconstructing lost context.
 
 Deleting a conversation blocks new dispatch into it, cancels its schedules and result deliveries, interrupts queued/follow-up work and waits for active native workers and the main run to stop. Its messages, tasks, worker sessions, execution records, questions, schedules, return cards and derived context are then removed together. Shared memory, presets, workspace files and other conversations remain. A failed native stop leaves the conversation present so deletion can be retried. There is no legacy task reassignment: obsolete account-only tasks without an owning conversation are discarded at initialization.
 
@@ -114,7 +186,9 @@ requests; only new original evidence is summarized, never an earlier summary.
 The current user input and latest complete tool interaction stay intact.
 
 General settings also exposes the main-reply step limit (2–30), concurrent
-background tasks (1–4), and timezone. Settings use revision-checked partial updates
+background tasks (1–12, default 6 shared across the account's BOTs), and timezone.
+The worker process also allows up to 12 active executions in total. Explicitly
+saved account limits are preserved. Settings use revision-checked partial updates
 and apply to subsequent replies and task dispatch. Existing schedules retain their
 own timezone.
 
@@ -248,7 +322,8 @@ Person's conversation/history index, tasks and ordinary chat data are retained.
 Regression coverage includes the recorded `名字 称呼 姓名` search failure,
 controlled-name lookup, automatic recall, evidence provenance, Profile changes,
 account isolation, stale corrections/deletion, callback injection and the full
-toolset under the minimum 8k request budget.
+toolset under a 10k model request budget. This is the full-toolset validation
+budget; runtime capacity still follows the selected model's context window.
 
 ## Stopping a task
 

@@ -21,10 +21,10 @@ export function personTool(name: string, description: string, properties: Record
 }
 export async function readPersonArtifact(userId: number, executionId: string, path: string, offset = 0) {
   const execution = getPersonExecution(userId, executionId)
-  const task = getPersonTask(userId, execution.task_id)
+  getPersonTask(userId, execution.task_id)
   if (!path) return { content: execution.output.slice(offset, offset + 6000), next_offset: offset + 6000 < execution.output.length ? offset + 6000 : null }
-  if (!task.workspace) throw personError('Task has no authorized workspace')
-  const root = await realpath(task.workspace)
+  if (!execution.workspace) throw personError('Execution has no authorized workspace')
+  const root = await realpath(execution.workspace)
   const target = await realpath(resolve(root, path))
   const local = relative(root, target)
   if (isAbsolute(local) || local === '..' || local.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) throw personError('Artifact is outside the task workspace', 403)
@@ -74,7 +74,7 @@ export function personTools(userId: number, role: PersonRole, taskId?: string, s
     }),
   ]
   if (role !== 'main') tools.push(...personMemoryReadTools(userId))
-  if (role === 'main') tools.push(personTool('bot_decision_request', 'Ask only for a missing user decision and wait for their reply through the chat. This never grants authorization.', { question: string, choices: { type: 'array', items: string, maxItems: 5 } }, ['question'], async () => {
+  if (role === 'main') tools.push(personTool('bot_decision_request', 'Ask for missing user input only when it materially blocks or changes the outcome, including when you cannot complete the goal and cannot identify a capable worker. Explain the specific gap and wait for their reply through the chat before dispatching affected work. Use this tool instead of leaving a blocking question in ordinary reply text. Make routine implementation choices yourself. A timeout or empty response is not consent. This never grants authorization.', { question: string, choices: { type: 'array', items: string, maxItems: 5 } }, ['question'], async () => {
     // The single-chat Agent adapter binds this definition to requestUserClarification.
     throw personError('User decisions require the single-chat runtime')
   }))
@@ -86,7 +86,7 @@ export function personTools(userId: number, role: PersonRole, taskId?: string, s
       const sessions = listPersonSessions(userId, String(args.search || '').slice(0, 200), offset, 11)
       return { current_session_id: sessionId, sessions: sessions.slice(0, 10).map(session => ({ session_id: session.id, name: session.title, last_active: session.last_active })), next_offset: sessions.length > 10 ? offset + 10 : null }
     }),
-    personTool('bot_agents_list', 'List worker Agent IDs and purposes. Follow next_offset.', { offset: integer }, [], async args => {
+    personTool('bot_agents_list', 'List worker Agent IDs and purposes. Follow next_offset. Assess suitability from stated purposes or verified capabilities; if no capable worker is identifiable, use bot_decision_request before dispatching.', { offset: integer }, [], async args => {
       const agents = await personExecutionAgents(userId)
       const offset = Math.max(0, Math.min(agents.length, Math.floor(Number(args.offset) || 0)))
       return { agents: agents.slice(offset, offset + 5), next_offset: offset + 5 < agents.length ? offset + 5 : null }

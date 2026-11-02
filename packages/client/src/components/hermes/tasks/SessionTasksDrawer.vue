@@ -9,6 +9,8 @@ import { personRequest, personTaskCanStop, stopPersonTask, type PersonTask } fro
 import { onPersonUpdated } from '@/api/studio/chat'
 import { useTaskDrawerLayout } from './useTaskDrawerLayout'
 import { chatSessionAgentAvatar, PERSON_AVATAR } from '@/utils/chat-agent-avatar'
+import { createRefreshQueue } from '@/utils/refresh-queue'
+import { clientUuid } from '@/utils/secure-uuid'
 
 const props = defineProps<{ show: boolean; person?: boolean; personSessionId?: string }>()
 const emit = defineEmits<{ 'update:show': [show: boolean]; 'open-person-task': [task: PersonTask] }>()
@@ -40,7 +42,6 @@ const taskStatusOptions = computed(() => [
   { key: 'closed', label: t('sessionTasks.closed') },
 ])
 const statusOptions = computed(() => [{ key: '', label: t('sessionTasks.all') }, ...taskStatusOptions.value])
-let requestSequence = 0
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 let disposed = false
@@ -49,25 +50,29 @@ function updateQuery(change: Record<string, string | undefined>) {
   return router.replace({ query: { ...route.query, taskPage: undefined, ...change } })
 }
 
-async function load(silent = false) {
-  const sequence = ++requestSequence
-  if (!silent) loading.value = true
-  error.value = false
-  try {
-    const query = { search: typeof route.query.taskSearch === 'string' ? route.query.taskSearch : '',
-      status: status.value, order: order.value, page: page.value }
-    const result = props.person ? await loadPersonTasks(query) : await fetchSessionTasks(query)
-    if (disposed || sequence !== requestSequence || !props.show) return
+type TaskQuery = { search: string; status: string; order: string; page: number; person?: boolean; sessionId?: string }
+const reads = createRefreshQueue<{ tasks: TaskRow[]; total: number }>({
+  load: (key, signal) => {
+    const query: TaskQuery = JSON.parse(key)
+    return query.person ? loadPersonTasks(query, signal) : fetchSessionTasks(query, signal)
+  },
+  apply: result => {
+    if (disposed || !props.show) return
     tasks.value = result.tasks
     total.value = result.total
+    error.value = false; loading.value = false
     if (!props.person && page.value > 1 && !result.tasks.length && result.total > 0) {
-      await updateQuery({ taskPage: String(Math.ceil(result.total / 50)) })
+      void updateQuery({ taskPage: String(Math.ceil(result.total / 50)) })
     }
-  } catch {
-    if (!disposed && sequence === requestSequence && props.show) error.value = true
-  } finally {
-    if (!disposed && sequence === requestSequence) loading.value = false
-  }
+  },
+  failed: () => { if (!disposed && props.show) { error.value = !tasks.value.length; loading.value = false } },
+})
+function load(silent = false) {
+  if (!silent) { loading.value = true; tasks.value = [] }
+  error.value = false
+  const query: TaskQuery = { search: typeof route.query.taskSearch === 'string' ? route.query.taskSearch : '',
+    status: status.value, order: order.value, page: page.value, person: props.person, sessionId: props.personSessionId }
+  return reads.refresh(JSON.stringify(query))
 }
 
 function refresh() {
@@ -76,11 +81,11 @@ function refresh() {
 async function changeStatus(task: TaskRow, value: string | number) {
   if (task.personTask?.running || savingIds.value.has(task.id) || value === task.status || !['open', 'completed', 'closed'].includes(String(value))) return
   savingIds.value = new Set([...savingIds.value, task.id])
-  requestSequence++
+  reads.cancel()
   try {
-    if (task.personTask) await personRequest('/tasks/apply', { task_id: task.id, action: value === 'closed' ? 'close' : 'reopen', expected_revision: task.personTask.revision, idempotency_key: crypto.randomUUID() })
+    if (task.personTask) await personRequest('/tasks/apply', { task_id: task.id, action: value === 'closed' ? 'close' : 'reopen', expected_revision: task.personTask.revision, idempotency_key: clientUuid() })
     else await updateSessionTaskStatus(task, value as SessionTaskStatus)
-    requestSequence++
+    reads.cancel()
     if (!disposed && props.show) await load(true)
   } catch {
     if (!disposed) message.error(t('sessionTasks.updateFailed'))
@@ -98,7 +103,7 @@ async function openSearch() {
 async function stopTask(task: TaskRow) {
   const person = task.personTask
   if (!person || !personTaskCanStop(person) || person.execution_state === 'stopping' || savingIds.value.has(task.id)) return
-  savingIds.value = new Set([...savingIds.value, task.id]); requestSequence++
+  savingIds.value = new Set([...savingIds.value, task.id]); reads.cancel()
   try { await stopPersonTask(person) }
   catch { if (!disposed) message.error(t('sessionTasks.updateFailed')) }
   finally {
@@ -132,8 +137,8 @@ function rowStatus(task: TaskRow) {
   return t(`person.states.${state}`)
 }
 function openTask(task: TaskRow) { if (task.personTask) emit('open-person-task', task.personTask) }
-async function loadPersonTasks(query: { search: string; status: string; order: string }) {
-  const result = await personRequest<{ tasks: PersonTask[] }>('/tasks/query', { ...query, session_id: props.personSessionId, limit: 100 })
+async function loadPersonTasks(query: TaskQuery, signal: AbortSignal) {
+  const result = await personRequest<{ tasks: PersonTask[] }>('/tasks/query', { search: query.search, status: query.status, order: query.order, session_id: query.sessionId, limit: 100 }, 'POST', signal)
   return { total: result.tasks.length, tasks: result.tasks.map(task => {
     const selection = JSON.parse(task.selection_json || '{}')
     return { id: task.id, title: task.title, summary: task.summary, status: task.status as SessionTaskStatus,
@@ -142,7 +147,7 @@ async function loadPersonTasks(query: { search: string; status: string; order: s
       agent: selection.runtime === 'ekko' ? 'ekko-agent' : selection.runtime || 'ekko-agent', personTask: task }
   }) }
 }
-const stopPersonUpdates = onPersonUpdated(() => { if (props.person) refresh() })
+const stopPersonUpdates = onPersonUpdated(event => { if (props.person && (!event.session_id || event.session_id === props.personSessionId)) refresh() })
 function formatTime(timestamp: number, compact = false) {
   const sameDay = new Date(timestamp).toDateString() === new Date().toDateString()
   const options: Intl.DateTimeFormatOptions = compact
@@ -155,11 +160,10 @@ watch(search, () => {
   searchTimer = setTimeout(() => { if (props.show) void updateQuery({ taskSearch: search.value.trim() || undefined }) }, 200)
 })
 watch([() => props.show, () => props.personSessionId, () => route.query.taskSearch, () => route.query.taskStatus, () => route.query.taskOrder, () => route.query.taskPage], () => {
-  requestSequence++
   const value = typeof route.query.taskSearch === 'string' ? route.query.taskSearch : ''
   if (search.value.trim() !== value) search.value = value
   if (props.show) void load()
-  else { clearTimeout(searchTimer); statusMenuOpen.value = false }
+  else { reads.cancel(); clearTimeout(searchTimer); statusMenuOpen.value = false }
 }, { immediate: true })
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown, true)
@@ -170,7 +174,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopPersonUpdates()
   disposed = true
-  requestSequence++
+  reads.dispose()
   clearTimeout(searchTimer)
   clearInterval(refreshTimer)
   window.removeEventListener('keydown', handleKeydown, true)
@@ -182,7 +186,7 @@ onUnmounted(() => {
 <template>
   <NDrawer :show="show" :width="drawerWidth" placement="right" display-directive="show" class="session-tasks-drawer" :aria-label="t('sessionTasks.title')" @update:show="emit('update:show', $event)">
     <NDrawerContent closable :native-scrollbar="true" :body-content-style="{ padding: '0', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }">
-      <template #header><div class="drawer-title"><SessionTaskIcon :size="18" /><span>{{ t('sessionTasks.title') }}</span></div></template>
+      <template #header><div class="drawer-title"><SessionTaskIcon :size="18" /><span>{{ t('sessionTasks.title') }}</span><span class="task-count">{{ total }}</span></div></template>
       <section class="session-tasks" :aria-label="t('sessionTasks.title')">
         <div class="task-list-scroll">
           <table class="task-list" :class="{ 'task-list--empty': loading || error || !tasks.length }" :aria-label="t('sessionTasks.title')" :aria-busy="loading">
@@ -211,7 +215,7 @@ onUnmounted(() => {
             </td></tr></tbody>
             <tbody v-else><tr v-for="task in tasks" :key="task.id" class="task-row" :class="{ 'task-row--completed': task.status === 'completed', 'task-row--closed': task.status === 'closed' }">
               <td class="task-cell">
-                <a class="task-title" :role="task.personTask ? 'button' : undefined" :tabindex="task.personTask ? 0 : undefined" @click="openTask(task)" @keydown.enter="openTask(task)" @keydown.space.prevent="openTask(task)" :href="taskHref(task)" :aria-label="t('sessionTasks.openTask', { title: task.title })">{{ task.title }}</a>
+                <a class="task-title" :role="task.personTask ? 'button' : undefined" :tabindex="task.personTask ? 0 : undefined" @click="openTask(task)" @keydown.enter="openTask(task)" @keydown.space.prevent="openTask(task)" :href="taskHref(task)" :aria-label="t('sessionTasks.openTask', { title: task.title })"><img class="task-agent-icon" :src="taskAvatar(task).src" :alt="taskAvatar(task).label" /><span>{{ task.title }}</span></a>
                 <details class="task-description"><summary><span class="description-text">{{ task.summary }}</span><SessionTaskIcon name="chevron-down" :size="13" /></summary></details>
                 <NButton v-if="personTaskCanStop(task.personTask)" class="task-stop" size="tiny" :loading="savingIds.has(task.id)" :disabled="savingIds.has(task.id) || task.personTask?.execution_state === 'stopping'" @click="stopTask(task)">
                   {{ t(task.personTask?.execution_state === 'stopping' ? 'person.states.stopping' : 'person.stopTask') }}
@@ -249,6 +253,7 @@ onUnmounted(() => {
 <style scoped lang="scss">
 
 @use '@/styles/variables' as *;
+@use '@/styles/agent-avatar' as *;
 @use './task-status' as task-status;
 
 .drawer-title { display: flex; align-items: center; gap: 10px; color: $text-primary; font-size: calc(var(--font-size-base, 14px) * 16 / 14); font-weight: 600; }
@@ -273,7 +278,10 @@ th:last-child, td:last-child { padding-inline: 4px 20px; }
 .search-action { width: 28px; }
 .task-row { vertical-align: top; }
 .task-row:hover, .task-row:focus-within { background: rgba(var(--accent-primary-rgb), 0.025); }
-.task-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: $text-primary; text-decoration: none; font-size: calc(var(--font-size-base, 14px) * 15 / 14); font-weight: 550; line-height: 1.6; }
+.task-agent-icon { @include agent-avatar(20px); }
+.task-count { font-variant-numeric: tabular-nums; }
+.task-title > span { overflow: hidden; text-overflow: ellipsis; }
+.task-title { display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: $text-primary; text-decoration: none; font-size: calc(var(--font-size-base, 14px) * 15 / 14); font-weight: 550; line-height: 1.6; }
 .task-title[role="button"], .task-open[role="button"] { cursor: pointer; }
 .task-title:hover { text-decoration: underline; text-underline-offset: 4px; }
 .task-description { margin-top: 5px; color: $text-secondary; font-size: calc(var(--font-size-base, 14px) * 13 / 14); line-height: 1.65; }
