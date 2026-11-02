@@ -83,7 +83,27 @@ describe('explicit cron session binding', () => {
     expect(m.inbox.readCronSessionBindings(m.notifications.cronBindingsDbPath(), m.notifications.studioInstanceId())).toEqual([])
   })
 
-  it('requires a login token and fences the destination', async () => {
+  it('a deliberate rebinding of a stopped job resumes its observation', async () => {
+    expect((await bind('agent1')).status).toBe(201)
+    const namespace = m.notifications.studioInstanceId()
+    // The observer stopped it, e.g. after an out-of-band delivery change since restored to local.
+    m.inbox.setCronJobObservationState(namespace, 'default', 'agent1', 'stopped')
+    m.inbox.setCronJobObserveCursor(namespace, 'default', 'agent1', '2026-11-01T00:00:00')
+    expect((await bind('agent1')).status).toBe(201)
+    expect(m.inbox.cronJobObservationState(namespace, 'default', 'agent1')).toBe('observing')
+    expect(m.inbox.cronJobObserveCursor(namespace, 'default', 'agent1')).toBeNull()
+    const { observeCronBindings } = await import(`${STUDIO}/services/session-notifications/cron-observer`)
+    const observed: string[] = []
+    await observeCronBindings({
+      namespace, bindingsPath: m.notifications.cronBindingsDbPath(),
+      observe: async (_profile: string, jobs: Array<{ job_id: string }>) => { observed.push(...jobs.map(job => job.job_id)); return { jobs: [], executions: [] } },
+      getSession: () => ({ profile: 'default', generation: m.store.getSessionGeneration('chat-1') }),
+      publish: () => {},
+    } as any)
+    expect(observed).toEqual(['agent1'])
+  })
+
+    it('requires a login token and fences the destination', async () => {
     expect((await bind('agent1', users.member.modelRun)).status).toBe(403)
     expect((await bind('agent1', users.outsider.token)).status).toBe(403)
     expect((await bind('agent1', users.member.token, { expected_session_generation: 'stale' })).body.error).toBe('session_generation_mismatch')
