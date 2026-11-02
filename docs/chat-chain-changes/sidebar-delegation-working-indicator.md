@@ -60,21 +60,27 @@ shared-session guests cannot subscribe to account state.
 ### Manual unread
 
 The ordinary chat and Person context menus offer **Mark as unread** for a
-persisted conversation whose server state is read and idle. `sessions.unread`
-sends `{ sessionId, unreadRevision }` and acknowledges `{ ok, changed }`. The
-server sets an account-specific `manual_unread` flag in `session_read_state` only
-when the stored revision still matches, then raises the revision (seeded from the
-clock, so a recreated session id cannot reuse an old one). A retried or stale
-request therefore changes nothing. Working, unknown, excluded or unauthorized
-sessions are rejected; the current account is re-read before the change. Empty
-conversations can be marked. Cursors, messages and notices are untouched.
+persisted conversation whose server state is read and idle. Each state carries
+`manualUnread`, `unreadRevision` and the session `generation` (the existing
+`sessions.generation_id`, assigned on first read and replaced when a session is
+reset or recreated). `sessions.unread` sends `{ sessionId, unreadRevision,
+generation }` and acknowledges `{ ok, changed }`. The server sets an
+account-specific `manual_unread` flag in `session_read_state` only when the
+generation and stored revision still match, then raises the revision, so a
+retried or stale request changes nothing. Working, unknown, excluded or
+unauthorized sessions are rejected, and the stored account is re-read (the
+login-disabled local scope has none). Empty conversations can be marked.
+Cursors, messages and notices are untouched.
 
-`unread` includes the manual flag. A read receipt clears it only when it names
-the current revision. The client sends that revision only after the user selects
-the conversation in the sidebar, including the one already open. Passive views,
-refresh restoration, reconnect snapshots and receipts from other devices still
-advance cursors but cannot clear a newer mark, so marking the open conversation
-leaves it on screen with its dot until it is selected again.
+`unread` includes the manual flag. A read receipt clears it only when it names the
+current revision and generation and the account is still allowed. The client
+sends them only after the user intentionally opens the conversation: selecting it
+in the sidebar (including the one already open) or in search, or an in-app
+navigation that moves to another conversation. The page's initial route
+(refresh, a new window or tab, a deep link) and automatic `replace` selections stay
+passive. So do reconnect snapshots and receipts from other devices: they still
+advance cursors but cannot clear a newer mark. Marking the open conversation
+keeps it on screen with its dot until it is opened again.
 
 The existing chat store still owns execution listeners and composer/queue rules.
 Its per-background-session observers remain available for transcript delivery;

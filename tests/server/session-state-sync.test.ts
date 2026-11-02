@@ -20,15 +20,16 @@ const clients: Socket[] = []
 const runtime = new Map<string, { working: boolean; backgroundPending: number }>()
 const inactiveAccounts = new Set<number>()
 const SCHEMA = `PRAGMA foreign_keys=ON;
-    CREATE TABLE sessions(id TEXT PRIMARY KEY,profile TEXT DEFAULT 'default',source TEXT DEFAULT 'cli',studio_user_id TEXT);
+    CREATE TABLE sessions(id TEXT PRIMARY KEY,profile TEXT DEFAULT 'default',source TEXT DEFAULT 'cli',studio_user_id TEXT,generation_id TEXT NOT NULL DEFAULT '');
     CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT,role TEXT,content TEXT);
     INSERT INTO sessions(id) VALUES ('chat');
     INSERT INTO sessions(id,profile) VALUES ('research','research');
     INSERT INTO sessions(id,studio_user_id) VALUES ('person-main-one','1'),('person-main-two','2');
     INSERT INTO sessions(id,source) VALUES ('group','group_chat'),('workflow','workflow'),('global','global_agent'),('person-task-hidden','builtin_agent');`
+// Like production, only stored, active accounts pass the current-account check.
 function createSync() {
   return new SessionStateSync(id => runtime.get(id) || { working: false, backgroundPending: 0 },
-    (user, profile) => profile === 'default' || user.id === 1, user => !inactiveAccounts.has(user.id))
+    (user, profile) => profile === 'default' || user.id === 1, user => [1, 2].includes(user.id) && !inactiveAccounts.has(user.id))
 }
 function once<T = any>(socket: Socket, event: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -47,12 +48,15 @@ async function device(user = 1) {
 function assistant(sessionId: string, content = 'Result') {
   return Number(state.db!.prepare("INSERT INTO messages(session_id,role,content) VALUES (?,'assistant',?)").run(sessionId, content).lastInsertRowid)
 }
-function read(socket: Socket, sessionId: string, messageId: number, attentionId?: number, unreadRevision?: unknown) {
-  return new Promise<{ ok: boolean }>(resolve => socket.emit('sessions.read', { sessionId, messageId, attentionId, unreadRevision }, resolve))
+function generationOf(sessionId: unknown) {
+  return (state.db!.prepare('SELECT generation_id FROM sessions WHERE id=?').get(String(sessionId)) as { generation_id?: string } | undefined)?.generation_id
 }
-function markUnread(socket: Socket, sessionId: unknown, unreadRevision: unknown) {
+function read(socket: Socket, sessionId: string, messageId: number, attentionId?: number, unreadRevision?: unknown, generation = generationOf(sessionId)) {
+  return new Promise<{ ok: boolean }>(resolve => socket.emit('sessions.read', { sessionId, messageId, attentionId, unreadRevision, generation }, resolve))
+}
+function markUnread(socket: Socket, sessionId: unknown, unreadRevision: unknown, generation = generationOf(sessionId)) {
   return new Promise<{ ok: boolean; changed?: boolean } | 'timeout'>(resolve => socket.timeout(1500)
-    .emit('sessions.unread', { sessionId, unreadRevision }, (err: Error | null, result: { ok: boolean; changed?: boolean }) => resolve(err ? 'timeout' : result)))
+    .emit('sessions.unread', { sessionId, unreadRevision, generation }, (err: Error | null, result: { ok: boolean; changed?: boolean }) => resolve(err ? 'timeout' : result)))
 }
 function stateOf(sessions: SessionListState[], sessionId: string) {
   return sessions.find(s => s.sessionId === sessionId)!
@@ -358,16 +362,50 @@ describe('manual unread', () => {
     expect(stateOf((await device()).snapshot, 'person-main-one')).toMatchObject({ manualUnread: false })
   })
 
-  it('does not let a receipt for a deleted session clear the mark of a recreated session with the same id', async () => {
+  it('fences requests for a deleted session from a recreated session with the same id', async () => {
     const a = await device()
-    await markUnread(a.socket, 'chat', 0)
+    const old = stateOf(a.snapshot, 'chat')
+    expect(old.generation).toEqual(expect.any(String))
+    await markUnread(a.socket, 'chat', 0, old.generation)
     const oldRevision = stateOf((await device()).snapshot, 'chat').unreadRevision!
     state.db!.prepare("DELETE FROM sessions WHERE id='chat'").run()
     state.db!.prepare("INSERT INTO sessions(id) VALUES ('chat')").run()
-    await new Promise(resolve => setTimeout(resolve, 5))
-    expect(await markUnread(a.socket, 'chat', 0)).toEqual({ ok: true, changed: true })
-    expect(await read(a.socket, 'chat', 0, 0, oldRevision)).toEqual({ ok: true })
+    const recreated = stateOf((await device()).snapshot, 'chat')
+    expect(recreated).toMatchObject({ manualUnread: false, unreadRevision: 0 })
+    expect(recreated.generation).not.toBe(old.generation)
+    // A delayed first mark for the old session does not apply to the new one.
+    expect(await markUnread(a.socket, 'chat', 0, old.generation)).toEqual({ ok: true, changed: false })
+    expect(stateOf((await device()).snapshot, 'chat').manualUnread).toBe(false)
+    expect(await markUnread(a.socket, 'chat', 0, recreated.generation)).toEqual({ ok: true, changed: true })
+    expect(stateOf((await device()).snapshot, 'chat').unreadRevision).toBe(oldRevision)
+    // Even with an equal revision, a receipt for the old session cannot clear the new mark.
+    expect(await read(a.socket, 'chat', 0, 0, oldRevision, old.generation)).toEqual({ ok: true })
     expect(stateOf((await device()).snapshot, 'chat')).toMatchObject({ unread: true, manualUnread: true })
+    for (const generation of [null, 42]) expect(await markUnread(a.socket, 'chat', oldRevision, generation as any)).toEqual({ ok: false })
+  })
+
+  it('treats the login-disabled local scope as its own account', async () => {
+    const local = await device(0), other = await device()
+    expect(await markUnread(local.socket, 'chat', 0)).toEqual({ ok: true, changed: true })
+    const revision = stateOf((await device(0)).snapshot, 'chat').unreadRevision!
+    expect(stateOf((await device()).snapshot, 'chat').manualUnread).toBe(false)
+    expect(await read(local.socket, 'chat', 0, 0, revision)).toEqual({ ok: true })
+    expect(stateOf((await device(0)).snapshot, 'chat').manualUnread).toBe(false)
+    void other
+  })
+
+  it('requires the current account to clear a mark', async () => {
+    const messageId = assistant('chat')
+    const a = await device()
+    await read(a.socket, 'chat', messageId)
+    await markUnread(a.socket, 'chat', 0)
+    const revision = stateOf((await device()).snapshot, 'chat').unreadRevision!
+    inactiveAccounts.add(1)
+    await read(a.socket, 'chat', messageId, 0, revision)
+    expect(listSessionStateRecords(1, 'chat')[0]).toMatchObject({ manualUnread: 1 })
+    inactiveAccounts.delete(1)
+    await read(a.socket, 'chat', messageId, 0, revision)
+    expect(listSessionStateRecords(1, 'chat')[0]).toMatchObject({ manualUnread: 0 })
   })
 
   it('combines with notification attention without changing notices or messages', async () => {

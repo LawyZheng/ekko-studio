@@ -1269,7 +1269,7 @@ test('Person marks the open conversation unread from its menu and reads it only 
   await page.goto('/#/person?session=person-main-1')
   await expect(page.locator('.person-title')).toHaveText('Person')
   await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__?.allSockets?.some((socket: any) => socket.options?.query?.session_state === '1'))).toBe(true)
-  const read = { working: false, backgroundPending: 0, lastMessageId: 4, readMessageId: 4, unread: false, manualUnread: false, unreadRevision: 0 }
+  const read = { working: false, backgroundPending: 0, lastMessageId: 4, readMessageId: 4, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g1' }
   const publish = (state: Record<string, unknown>) => page.evaluate(state => {
     const socket = (window as any).__PW_CHAT_SOCKET__.allSockets.find((socket: any) => socket.options?.query?.session_state === '1')
     socket.__trigger('sessions.state.updated', state)
@@ -1287,7 +1287,7 @@ test('Person marks the open conversation unread from its menu and reads it only 
 
   await current.click({ button: 'right' })
   await option.click()
-  await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks?.map((a: any) => a.payload))).toEqual([{ sessionId: 'person-main-1', unreadRevision: 0 }])
+  await expect.poll(() => page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks?.map((a: any) => a.payload))).toEqual([{ sessionId: 'person-main-1', unreadRevision: 0, generation: 'g1' }])
   await page.evaluate(() => (window as any).__PW_CHAT_SOCKET__.acks[0].ack(null, { ok: true, changed: true }))
   await publish({ sessionId: 'person-main-1', ...read, unread: true, manualUnread: true, unreadRevision: 9 })
   await expect(current.locator('.session-item-unread-dot')).toBeVisible()
@@ -1297,7 +1297,7 @@ test('Person marks the open conversation unread from its menu and reads it only 
   await page.screenshot({ path: testInfo.outputPath('person-manual-unread-open.png') })
 
   await current.click()
-  await expect.poll(() => emitted(page, 'sessions.read')).toContainEqual({ sessionId: 'person-main-1', messageId: 4, unreadRevision: 9 })
+  await expect.poll(() => emitted(page, 'sessions.read')).toContainEqual({ sessionId: 'person-main-1', messageId: 4, unreadRevision: 9, generation: 'g1' })
   await publish({ sessionId: 'person-main-1', ...read, unreadRevision: 9 })
   await expect(current.locator('.session-item-unread-dot')).toHaveCount(0)
 })

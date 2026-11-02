@@ -1,5 +1,6 @@
 import { ref, reactive, onScopeDispose } from 'vue'
 import { defineStore } from 'pinia'
+import { START_LOCATION, type RouteLocationNormalized, type Router } from 'vue-router'
 import { connectSessionState } from '@/api/studio/session-state'
 import { onAuthInvalidated } from '@/api/auth-invalidation'
 import type { SessionListState, SessionStateSnapshot } from '../../../../shared/session-state'
@@ -14,6 +15,10 @@ export const useSessionStateStore = defineStore('sessionState', () => {
   // The manual-unread revision the user saw when they last chose to open each conversation.
   // Passive views keep their older revision, so they cannot clear a newer manual mark.
   const opened = reactive(new Map<string, number | 'pending'>())
+  // An open made before any state arrived refers to the first state, never to a later mark.
+  const bindOpened = (state: SessionListState) => {
+    if (opened.get(state.sessionId) === 'pending' && state.unreadRevision != null) opened.set(state.sessionId, state.unreadRevision)
+  }
 
   function start() {
     if (socket) return
@@ -22,10 +27,12 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     owner.on('sessions.state.snapshot', (snapshot: SessionStateSnapshot) => {
       if (socket !== owner) return
       pendingReads.clear()
+      snapshot.sessions.forEach(bindOpened)
       sessions.value = new Map(snapshot.sessions.map(state => [state.sessionId, state]))
     })
     owner.on('sessions.state.updated', (state: SessionListState) => {
       if (socket !== owner) return
+      bindOpened(state)
       sessions.value.set(state.sessionId, state)
       const pending = pendingReads.get(state.sessionId)
       if (pending && state.readMessageId >= pending.messageId && (state.readAttentionId || 0) >= pending.attentionId
@@ -52,12 +59,10 @@ export const useSessionStateStore = defineStore('sessionState', () => {
 
   function markRead(sessionId: string) {
     const state = sessions.value.get(sessionId)
-    let openedRevision = opened.get(sessionId)
-    if (openedRevision === 'pending' && state?.unreadRevision != null) opened.set(sessionId, openedRevision = state.unreadRevision)
     if (!socket?.connected || state?.working || !state?.unread) return
     const messageId = state.lastMessageId
     const attentionId = state.lastAttentionId || 0
-    const clearsMark = !!state.manualUnread && openedRevision === state.unreadRevision
+    const clearsMark = !!state.manualUnread && opened.get(sessionId) === state.unreadRevision
     if (!clearsMark && messageId <= state.readMessageId && attentionId <= (state.readAttentionId || 0)) return
     const unreadRevision = clearsMark ? state.unreadRevision : undefined
     const pending = pendingReads.get(sessionId)
@@ -65,14 +70,14 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     const receipt = { messageId, attentionId, unreadRevision }
     pendingReads.set(sessionId, receipt)
     socket.emit('sessions.read', { sessionId, messageId, ...(state.lastAttentionId != null ? { attentionId } : {}),
-      ...(unreadRevision != null ? { unreadRevision } : {}) }, (result: { ok: boolean }) => {
+      ...(unreadRevision != null ? { unreadRevision, generation: state.generation } : {}) }, (result: { ok: boolean }) => {
       if (!result?.ok && pendingReads.get(sessionId) === receipt) pendingReads.delete(sessionId)
     })
   }
 
   function canMarkUnread(sessionId: string) {
     const state = sessions.value.get(sessionId)
-    return !!state && typeof state.unreadRevision === 'number' && !state.working && !state.unread
+    return !!state && typeof state.unreadRevision === 'number' && typeof state.generation === 'string' && !state.working && !state.unread
   }
 
   /** Resolves true only when the server applied the mark; stale or failed requests change nothing. */
@@ -81,7 +86,7 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     const state = sessions.value.get(sessionId)
     if (!owner?.connected || !state || !canMarkUnread(sessionId)) return Promise.resolve(false)
     return new Promise(resolve => owner.timeout(MARK_UNREAD_TIMEOUT_MS).emit('sessions.unread',
-      { sessionId, unreadRevision: state.unreadRevision },
+      { sessionId, unreadRevision: state.unreadRevision, generation: state.generation },
       (error: Error | null, result?: { ok: boolean; changed?: boolean }) => resolve(!error && socket === owner && !!result?.ok && !!result.changed)))
   }
 
@@ -94,3 +99,22 @@ export const useSessionStateStore = defineStore('sessionState', () => {
     },
     backgroundCount: (id: string) => sessions.value.get(id)?.backgroundPending ?? 0 }
 })
+
+function routedSessionId(route: RouteLocationNormalized): string | null {
+  if (route.name === 'hermes.session') return typeof route.params.sessionId === 'string' ? route.params.sessionId : null
+  if (route.name === 'hermes.person') return typeof route.query.session === 'string' ? route.query.session : null
+  return null
+}
+
+/**
+ * In-app navigation to another conversation (sidebar, search, pending actions, links) opens it
+ * intentionally. The page's initial route and automatic `replace` selections stay passive, so a
+ * refresh or a fallback selection cannot clear a manual unread mark.
+ */
+export function trackSessionOpens(router: Router) {
+  router.afterEach((to, from, failure) => {
+    const sessionId = routedSessionId(to)
+    if (failure || !sessionId || from === START_LOCATION || window.history.state?.replaced) return
+    if (sessionId !== routedSessionId(from)) useSessionStateStore().acknowledge(sessionId)
+  })
+}

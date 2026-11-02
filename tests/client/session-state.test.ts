@@ -3,6 +3,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
+import { createRouter, createWebHashHistory } from 'vue-router'
 
 const transport = vi.hoisted(() => ({ sockets: [] as any[], invalidate: null as null | (() => void) }))
 vi.mock('@/api/studio/session-state', () => ({ connectSessionState: () => {
@@ -17,7 +18,7 @@ vi.mock('@/api/auth-invalidation', () => ({ onAuthInvalidated: (handler: () => v
   transport.invalidate = handler
   return () => { transport.invalidate = null }
 } }))
-import { useSessionStateStore } from '@/stores/hermes/session-state'
+import { trackSessionOpens, useSessionStateStore } from '@/stores/hermes/session-state'
 import { useSessionReadState } from '@/composables/useSessionReadState'
 
 const status = (sessionId: string, changes = {}) => ({ sessionId, working: false, backgroundPending: 0,
@@ -130,16 +131,16 @@ describe('session state subscription', () => {
   it('offers manual unread only for read conversations the server can mark and reports the outcome', async () => {
     const store = useSessionStateStore(); store.start()
     const socket = transport.sockets[0]
-    const read = { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0 }
+    const read = { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' }
     socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', read), status('busy', { ...read, working: true }),
-      status('fresh', { unreadRevision: 0 }), status('legacy', { readMessageId: 10, unread: false })] })
+      status('fresh', { unreadRevision: 0, generation: 'g' }), status('legacy', { readMessageId: 10, unread: false })] })
     expect(['chat', 'busy', 'fresh', 'legacy', 'missing'].map(id => store.canMarkUnread(id))).toEqual([true, false, false, false, false])
     const outcomes: Array<[Error | null, any, boolean]> = [[null, { ok: true, changed: true }, true],
       [null, { ok: true, changed: false }, false], [null, { ok: false }, false], [new Error('operation has timed out'), undefined, false]]
     for (const [error, result, expected] of outcomes) {
       const pending = store.markUnread('chat')
       expect(socket.timeout).toHaveBeenLastCalledWith(expect.any(Number))
-      expect(socket.emit).toHaveBeenLastCalledWith('sessions.unread', { sessionId: 'chat', unreadRevision: 0 }, expect.any(Function))
+      expect(socket.emit).toHaveBeenLastCalledWith('sessions.unread', { sessionId: 'chat', unreadRevision: 0, generation: 'g' }, expect.any(Function))
       socket.emit.mock.lastCall[2](error, result)
       expect(await pending).toBe(expected)
     }
@@ -155,8 +156,8 @@ describe('session state subscription', () => {
     const store = useSessionStateStore()
     mount(defineComponent({ setup() { useSessionReadState(() => viewed.value); return () => null } }))
     const socket = transport.sockets[0]
-    const update = (changes: Record<string, unknown>) => socket.handlers.get('sessions.state.updated')(status('chat', changes))
-    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0 })] })
+    const update = (changes: Record<string, unknown>) => socket.handlers.get('sessions.state.updated')(status('chat', { generation: 'g', ...changes }))
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' })] })
     store.acknowledge('chat')
     viewed.value = 'chat'; await nextTick()
     expect(socket.emit).not.toHaveBeenCalled()
@@ -172,12 +173,12 @@ describe('session state subscription', () => {
     expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11 }, expect.any(Function))
     update({ lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 5 }); await nextTick()
     // A reconnect snapshot does not count as opening the conversation.
-    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 5 })] })
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 5, generation: 'g' })] })
     await nextTick()
     expect(socket.emit).toHaveBeenCalledTimes(1)
     // Selecting it again, even while it is already open, reads the mark.
     store.acknowledge('chat'); await nextTick()
-    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 5 }, expect.any(Function))
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 5, generation: 'g' }, expect.any(Function))
     store.acknowledge('chat'); await nextTick()
     expect(socket.emit).toHaveBeenCalledTimes(2)
     update({ lastMessageId: 11, readMessageId: 11, unread: false, manualUnread: false, unreadRevision: 5 }); await nextTick()
@@ -186,22 +187,60 @@ describe('session state subscription', () => {
     update({ lastMessageId: 11, readMessageId: 11, unread: true, manualUnread: true, unreadRevision: 6 }); await nextTick()
     expect(socket.emit).toHaveBeenCalledTimes(2)
     store.acknowledge('chat'); await nextTick()
-    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 6 }, expect.any(Function))
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 11, unreadRevision: 6, generation: 'g' }, expect.any(Function))
   })
 
   it('applies an open made before the first state and forgets opens after logout', async () => {
     const store = useSessionStateStore(); store.start()
     let socket = transport.sockets[0]
-    const marked = status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 3 })
+    const marked = status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 3, generation: 'g' })
     store.acknowledge('chat')
     socket.handlers.get('sessions.state.snapshot')({ sessions: [marked] })
     store.markRead('chat')
-    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 3 }, expect.any(Function))
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 3, generation: 'g' }, expect.any(Function))
     transport.invalidate!()
     store.start()
     socket = transport.sockets[1]
     socket.handlers.get('sessions.state.snapshot')({ sessions: [marked] })
     store.markRead('chat')
     expect(socket.emit).not.toHaveBeenCalled()
+  })
+
+  it('binds an open made before the first state to that state, not to a later mark', async () => {
+    const viewed = ref<string | null>(null)
+    const store = useSessionStateStore()
+    mount(defineComponent({ setup() { useSessionReadState(() => viewed.value); return () => null } }))
+    const socket = transport.sockets[0]
+    store.acknowledge('chat')
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [status('chat', { readMessageId: 10, unread: false, manualUnread: false, unreadRevision: 0, generation: 'g' })] })
+    // Marked unread while the transcript is still loading.
+    socket.handlers.get('sessions.state.updated')(status('chat', { readMessageId: 10, unread: true, manualUnread: true, unreadRevision: 1, generation: 'g' }))
+    viewed.value = 'chat'; await nextTick()
+    expect(socket.emit).not.toHaveBeenCalled()
+    store.acknowledge('chat'); await nextTick()
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 1, generation: 'g' }, expect.any(Function))
+  })
+
+  it('counts in-app navigation to a conversation as opening it, but not the initial route or replacements', async () => {
+    const store = useSessionStateStore(); store.start()
+    const socket = transport.sockets[0]
+    const component = { render: () => null }
+    const router = createRouter({ history: createWebHashHistory(), routes: [{ path: '/', name: 'home', component },
+      { path: '/hermes/session/:sessionId', name: 'hermes.session', component }, { path: '/person', name: 'hermes.person', component }] })
+    trackSessionOpens(router)
+    const marked = (sessionId: string, unreadRevision: number) => status(sessionId, { readMessageId: 10, unread: true, manualUnread: true, unreadRevision, generation: 'g' })
+    socket.handlers.get('sessions.state.snapshot')({ sessions: [marked('chat', 3), marked('person-main-one', 4)] })
+    await router.push('/hermes/session/chat') // The page's initial route, e.g. after a refresh.
+    store.markRead('chat')
+    await router.push('/')
+    await router.replace({ name: 'hermes.person', query: { session: 'person-main-one' } }) // An automatic selection.
+    store.markRead('person-main-one')
+    expect(socket.emit).not.toHaveBeenCalled()
+    await router.push('/hermes/session/chat')
+    store.markRead('chat')
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'chat', messageId: 10, unreadRevision: 3, generation: 'g' }, expect.any(Function))
+    await router.push({ name: 'hermes.person', query: { session: 'person-main-one', message: '2' } })
+    store.markRead('person-main-one')
+    expect(socket.emit).toHaveBeenLastCalledWith('sessions.read', { sessionId: 'person-main-one', messageId: 10, unreadRevision: 4, generation: 'g' }, expect.any(Function))
   })
 })
