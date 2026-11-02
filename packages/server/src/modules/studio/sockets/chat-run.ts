@@ -51,6 +51,7 @@ import {
 import { settleQueuedMachineEvents } from '../services/session-notifications/machine-events'
 import { advanceRunOwnership } from '../services/chat-run/run-ownership'
 import { cronBindingsDbPath, studioInstanceId } from '../public/session-notifications'
+import { importScriptReports } from '../services/session-notifications/script-reports'
 import { bindLegacyAppEvents } from '../services/webhooks/legacy-app-events'
 import { bindAppEventSubscription } from '../services/webhooks/app-events'
 import { mobileDeviceRoom, mobileDeviceId, sameMobileDevice, mobileEventAllowed, type MobileDeviceTarget } from '../services/chat-run/mobile-device-target'
@@ -2454,6 +2455,12 @@ export class ChatRunSocket {
       })
     } catch (err) {
       logger.debug(err, '[chat-run-socket] cron session observation unavailable')
+    }
+    // Same cadence: import finished script invocation reports. This never runs a script.
+    try {
+      for (const record of importScriptReports().accepted) this.publishSessionNotice(record)
+    } catch (err) {
+      logger.debug(err, '[chat-run-socket] script report import unavailable')
     } finally {
       this.cronObserveInFlight = false
     }
@@ -2480,7 +2487,8 @@ export class ChatRunSocket {
    */
   publishSessionNotice(record: SessionNotificationRecord) {
     const session = getSession(record.session_id)
-    const external = record.kind === 'external'
+    // Caller-supplied and script-reported notices are re-fenced and re-authorized at publication.
+    const external = record.kind === 'external' || record.kind === 'script_report'
     if (session && (session.profile || 'default') === record.profile
       && (!external || getSessionGeneration(record.session_id) === record.session_generation)) {
       const payload = {

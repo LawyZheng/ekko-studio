@@ -70,10 +70,18 @@ const externalLink = computed(() => {
   return url && /^https?:\/\//i.test(url) ? url : null;
 });
 
+// Script output is untrusted data too: plain text, never Markdown.
+const plainNotice = computed(() => externalNotice.value || props.message.studioNotice?.kind === "script_report");
+
 const studioNoticeTitle = computed(() => {
   const notice = props.message.studioNotice;
   if (!notice) return "";
   if (notice.kind === "external") return notice.title;
+  if (notice.kind === "script_report") {
+    return notice.outcome === "failed" || notice.outcome === "launch_failed"
+      ? t("chat.sessionNotice.scriptReportFailedTitle", { name: notice.job_name })
+      : t("chat.sessionNotice.scriptReportTitle", { name: notice.job_name });
+  }
   return notice.success === false || notice.status === "failed"
     ? t("chat.sessionNotice.cronFailedTitle", { name: notice.job_name })
     : t("chat.sessionNotice.cronTitle", { name: notice.job_name });
@@ -83,6 +91,13 @@ const studioNoticeDetail = computed(() => {
   const notice = props.message.studioNotice;
   if (!notice) return "";
   if (notice.kind === "external") return t("chat.sessionNotice.externalSource", { source: notice.source });
+  if (notice.kind === "script_report") {
+    if (notice.disposition === "unknown") return t("chat.sessionNotice.scriptReportUnknown");
+    if (notice.disposition === "status_only") return t("chat.sessionNotice.scriptReportUnavailable");
+    return notice.truncated
+      ? `${t("chat.sessionNotice.scriptReportProvenance")} ${t("chat.sessionNotice.truncated")}`
+      : t("chat.sessionNotice.scriptReportProvenance");
+  }
   if (notice.disposition === "unknown") return t("chat.sessionNotice.unknown");
   if (notice.reason === "output_unavailable_for_runtime") return t("chat.sessionNotice.outputUnavailable");
   if (notice.reason === "receipt_unavailable") return t("chat.sessionNotice.receiptUnavailable");
@@ -1282,13 +1297,13 @@ onBeforeUnmount(() => {
               <div class="studio-notice-title">{{ studioNoticeTitle }}</div>
               <div v-if="studioNoticeDetail" class="studio-notice-detail">{{ studioNoticeDetail }}</div>
             </div>
-            <template v-if="externalNotice">
+            <template v-if="plainNotice">
               <div class="studio-notice-text">{{ message.content }}</div>
               <a v-if="externalLink" class="studio-notice-link" :href="externalLink" target="_blank" rel="noopener noreferrer nofollow">{{ externalLink }}</a>
             </template>
             <!-- Render system message content -->
             <MarkdownRenderer
-              v-if="message.role === 'system' && message.content && !isCommandMessage && !externalNotice"
+              v-if="message.role === 'system' && message.content && !isCommandMessage && !plainNotice"
               :content="message.content"
             />
             <div v-if="isStatusCommand" class="command-result command-status">
