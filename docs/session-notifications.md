@@ -109,9 +109,118 @@ Notices that do not fit are not marked projected and reach a later question.
 `deliver=local`, so a pass-through `attach_to_session` has no effect, and the
 next-question block is not native attachment.
 
-**Limitation.** Full script-only (`no_agent`) output is not delivered. Hermes keeps no
-execution-keyed receipt for it, so Studio shows the execution id and status only.
-**UNIMPLEMENTED** in this version.
+**Script-only jobs.** Hermes keeps no execution-keyed receipt of a `no_agent` job's
+successful output or silence, so a bound native observation can only report status. Use a
+script invocation report instead.
+
+## Script invocation reports (opt-in, script-only jobs)
+
+Hermes keeps no execution-keyed receipt of a `no_agent` job's successful output or silence. A
+prospective, explicitly enrolled `no_agent` job therefore runs an Ekko-generated wrapper instead of
+the target script. The original Hermes scheduler still decides when it runs, claims it, times it
+out and keeps its own ledger and output documents. Nothing in Hermes is patched and there is no
+second scheduler, model turn, browser token or network listener.
+
+```text
+Hermes scheduler -> scripts/ekko-script-reports/<binding>.py (wrapper) -> target script
+wrapper -> <Web UI home>/script-reports/spool/<binding>/<invocation>/ -> Studio importer (15 s)
+        -> generation-fenced passive notice in the bound session
+```
+
+**Identity.** Each launch of the wrapper gets a fresh UUID (`identity_kind: wrapper_invocation`).
+`native_execution_id` is always null. A report says what this invocation of the wrapper observed;
+it is not a native execution receipt and does not prove that Hermes committed the run. Every launch
+is reported (scheduled, `hermes cron run`, or a direct start); there is no scheduled-only filter
+and no deduplication by time or content.
+
+**Enrollment.** `POST /api/hermes/script-reports/enrollments` with
+`{ profile, session_id, expected_session_generation, name, schedule, script, workdir?, interpreter?, paused? }`
+and an interactive login token (signed `purpose: "login"`) as a bearer header; model-run, App and
+share credentials are refused. `script` is relative to the profile's `scripts/` (`.sh`, `.bash`,
+`.py`; no traversal or symlink escape; behind a symlink inside `scripts/`, the resolved file and its
+extension decide the interpreter, as in Hermes). Studio:
+
+1. checks the account (active, profile access) and that the session is an ordinary local Hermes
+   chat whose current generation equals the frozen one;
+2. writes a private manifest (`script-reports/bindings/<binding>/manifest.r1.json`, 0600: target
+   resolved path, SHA-256, native working directory, spool) and a private spool (0700);
+3. records the binding as `enrolling` and runs
+   `hermes cron create --paused --no-agent --deliver local --script <target> …` with the **original
+   target**, so Hermes' create-time lifecycle guard validates the real script. A refusal creates
+   nothing (`422 native_create_rejected`). The job id comes from that command's own `Created job:`
+   line, never from a job-list diff, and is recorded at once;
+4. writes the generated wrapper to `<profile>/scripts/ekko-script-reports/<binding>.py` and points
+   the job at it with `hermes cron edit <job> --script …`;
+5. verifies the stored job by id (wrapper script, `no_agent`, `deliver=local`, paused), activates the
+   binding and resumes the job unless `paused: true`. If the binding was revoked meanwhile it is
+   never resumed (`409 binding_revoked`).
+
+Enrollment and revocation of one binding never interleave. A failure after creation leaves the job
+paused and returns its id. Existing jobs are never converted, and nothing is migrated.
+
+`GET /api/hermes/script-reports/enrollments?profile=` lists the caller's bindings with import counts
+(`accepted`, `silent`, `rejected`, `quarantined`) and `incomplete` invocations.
+`POST /api/hermes/script-reports/enrollments/{binding}/revoke` is final: it writes a revocation
+marker (the wrapper then runs the target directly and captures nothing), stops importing and pauses
+the native job. The wrapper file and job configuration are left for the user to remove.
+
+**Wrapper** (POSIX; synthetic Bash and standard-library Python verified):
+
+- The target must still be the enrolled file: same resolved path (no symlink swapped into it or an
+  ancestor), a regular file, same SHA-256. Otherwise the wrapper exits 2 without starting it, also
+  for a revoked binding. Changing the target means revoking and enrolling again.
+- Interpreter as in Hermes: `.sh`/`.bash` under `bash`, other files under the Python Hermes chose for
+  the wrapper (the job's `interpreter` when set). The working directory is the job's `workdir`, else
+  the target's folder. Streams are relayed byte for byte; the exit status is the target's, and a
+  target killed by a signal makes the wrapper die by the same signal. The target stays in the
+  wrapper's process group, so Hermes' timeout and cancellation reach it and its descendants.
+- Classification follows Hermes: a nonzero exit is a failure even if the output is silent; on exit
+  0 a final `{"wakeAgent": false}` line, empty output or a silence marker is silence. Successful
+  stderr is never a body.
+- Capture is bounded (1 MiB per stream; beyond that no body and no silence inference). The body is
+  sanitized before the first durable write with linear rules (Authorization headers, bearer/basic
+  tokens, URL credentials, secret-named assignments including escaped quoted values, whole object or
+  array values and assignments nested in other values, PEM keys, JWTs, common key formats), clipped to 32 KiB, and the whole
+  record is kept under 92 KiB by further truncation. NUL bytes are shown as `␀`. If sanitization
+  fails the body is omitted.
+- Before the target starts, the wrapper must reserve its invocation under an exclusive lock: a full
+  spool (200 pending), a spool that is not private or not writable exits 2 and the target does not
+  run. After the target has started, report storage errors never rerun it and never change its
+  streams or exit status; the invocation then stays `incomplete`.
+
+**Import.** On each 15-second cron observation pass Studio also reads at most 50 finished reports per pass from active and
+revoked bindings. The binding, never the report, chooses the destination. Each report is validated
+strictly and accepted once under `script-report:[binding, revision, invocation]` with the frozen
+generation:
+
+| Wrapper outcome | Disposition | Shown |
+| --- | --- | --- |
+| `output` | `notified` | yes, plain text, with attention |
+| `failed`, `launch_failed` | `notified` (failure title, sanitized diagnostic) | yes |
+| `silent` | `silent` | no, and no attention |
+| `interrupted` (the wrapper was signalled) | `unknown` | yes |
+| `output_unavailable` | `status_only` | yes |
+
+Studio sanitizes the body again on import. A report is dropped, never rerouted, when the binding is
+revoked, the account is inactive or lost profile access, the session was reset or recreated, or the
+native job no longer runs the enrolled wrapper with `deliver=local` (`target_changed`; checked
+against `cron/jobs.json` on every pass). A different report under an accepted identity is
+quarantined. A rejection or quarantine is final: a report replayed after a crash is not accepted
+even if its destination has become valid again, and a replay that finds its notice already committed
+records the acceptance. An acknowledged entry leaves the spool in one rename to a dot tombstone,
+which later passes remove, so an interrupted removal never leaves a settled report behind. The spool entry is removed only after its disposition is durable, so an importer killed
+before the inbox commit imports the report on its next pass and one killed after the commit only
+records a duplicate. An invocation with `started.json` but no final report (still running, or
+killed with SIGKILL as Hermes' timeout does) stays `incomplete`; its outcome is never inferred from
+elapsed time. Studio never launches, retries or reruns a script.
+
+**Limits.** Local POSIX only, Studio and Hermes under the same OS user (file permissions are the
+trust boundary; another process of that user can forge a report or swap a file between the
+wrapper's check and the launch). The wrapper does not reproduce Hermes' managed-store Python
+bootstrap, so a Python target importing Hermes' own packages is unsupported. The sanitizer is
+conservative pattern matching and cannot recognize an arbitrary password in prose. Like cron
+notices, a shown report is projected once, as escaped untrusted data, into the session's next
+intentional question. There is no enrollment UI yet: the API above is the opt-in interface.
 
 ## Terminal completions
 
@@ -249,11 +358,14 @@ question, not the projected text, for every notice-projected turn.
 ## Verification
 
 ```bash
-npx vitest run tests/server/session-notifications-cron.test.ts tests/server/session-notifications-external.test.ts
+npx vitest run tests/server/session-notifications-cron.test.ts tests/server/session-notifications-external.test.ts \
+  tests/server/script-report-wrapper.test.ts tests/server/script-report-import.test.ts tests/server/script-report-enrollment.test.ts \
+  tests/server/cron-session-bindings.test.ts
 HERMES_REAL_BRIDGE_E2E=1 HERMES_AGENT_ROOT=<read-only hermes checkout> \
   npx vitest run tests/server/hermes-session-notifications-real.test.ts
 npm run build && HERMES_AGENT_ROOT=<read-only hermes checkout> \
   node tests/server/fixtures/session-notifications-e2e.mjs
+npm run build && HERMES_AGENT_ROOT=<read-only hermes checkout> node tests/server/fixtures/script-reports-e2e.mjs
 ```
 
 The real harnesses use disposable `HOME`, `HERMES_HOME`, Web UI home and `TMPDIR`, a
