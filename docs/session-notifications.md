@@ -20,7 +20,8 @@ changing Hermes:
    agent-backed native job whose stored `deliver` is `local` to the session's frozen generation.
    It writes `<Web UI home>/session-notifications/cron-bindings.db` and changes nothing in
    Hermes. It needs an interactive login token (signed `purpose: "login"`) as a bearer header,
-   so a model run cannot bind on its own. Script-only jobs are refused
+   so a model run cannot bind on its own; a model run asks the user instead (see
+   [Consent requests](#consent-requests-model-initiated-delivery)). Script-only jobs are refused
    (`422 script_job_requires_script_report`), and explicit targets (`slack:…`, `all`, …) are
    refused (`422 explicit_delivery_target`) and never mirrored.
 
@@ -33,7 +34,8 @@ changing Hermes:
    inside the Agent Bridge, replaced its availability check and cleared Hermes tool caches so
    chat-created jobs were bound automatically. That in-memory modification of Hermes is
    removed. Consequences: a job a model creates with `cronjob_manage` in a Studio chat is a
-   plain native job (`deliver=local`) and is not bound until the user binds it; and
+   plain native job (`deliver=local`) and is not bound until the user approves a consent
+   request for it (or binds it directly with a login token); and
    `cronjob_manage` is offered to Studio bridge agents only when Hermes' own availability check
    allows it.
 2. **Observation.** Every 15 seconds `ChatRunSocket` asks the profile's bridge worker
@@ -155,8 +157,30 @@ extension decide the interpreter, as in Hermes). Studio:
    binding and resumes the job unless `paused: true`. If the binding was revoked meanwhile it is
    never resumed (`409 binding_revoked`).
 
-Enrollment and revocation of one binding never interleave. A failure after creation leaves the job
-paused and returns its id. Existing jobs are never converted, and nothing is migrated.
+Enrollment and revocation of one binding never interleave. The plan (target path, kind, SHA-256,
+name, schedule, working directory, interpreter, resume intent) is frozen before any write; the
+manifest records that approved digest, and the destination and target are checked again after the
+native create and edit, before activation and resume, and once the resume returns. While the job is
+being created, Studio-managed job edits in that profile wait, so the stored configuration Hermes
+created from the plan is the one verified (every stored field except run-time bookkeeping, with the
+wrapper in place of the target) before activation and after resume. If anything was invalidated by
+the time the resume returns, the binding fails, its wrapper becomes a passthrough and the job is
+paused again and verified, with its id returned. A failure after creation leaves the job
+paused and returns its id. Nothing is migrated; an existing job reports only after an explicit
+adoption (below).
+
+**Adopting an existing job** (consent only, `mode: "existing"`): a `no_agent` job with
+`deliver=local` starts reporting its **future** invocations. Under a per-job lock Studio re-checks
+the approved job configuration (every stored field except run-time bookkeeping) and target bytes,
+requires the job to still be scheduled or paused exactly as when it was proposed (a later user
+pause or resume makes the request stale), checks that the configured script spelling (an in-profile
+alias is fine) still resolves to the approved file,
+runs Hermes' own create-time lifecycle guard on the target through a read-only helper
+(`assets/script-reports/ekko_native_guard_check.py`, because native `update_job` never re-runs it),
+refuses a job with a claimed or running execution, pauses it, points it at a generated wrapper,
+verifies that only the script changed, re-checks the destination, activates the binding and resumes
+the job only if it was scheduled at consent time. A failure leaves it paused with the binding marked
+failed and its job id recorded. There is no duplicate job and no historical backfill.
 
 `GET /api/hermes/script-reports/enrollments?profile=` lists the caller's bindings with import counts
 (`accepted`, `silent`, `rejected`, `quarantined`) and `incomplete` invocations.
@@ -220,7 +244,58 @@ wrapper's check and the launch). The wrapper does not reproduce Hermes' managed-
 bootstrap, so a Python target importing Hermes' own packages is unsupported. The sanitizer is
 conservative pattern matching and cannot recognize an arbitrary password in prose. Like cron
 notices, a shown report is projected once, as escaped untrusted data, into the session's next
-intentional question. There is no enrollment UI yet: the API above is the opt-in interface.
+intentional question. The login API above stays available; model-initiated enrollment goes through
+consent requests.
+
+## Consent requests (model-initiated delivery)
+
+The direct binding and enrollment endpoints accept only a login credential. A model turn's ordinary
+MCP runtime credential (`model_run`, written to `<profile>/.model-run-token` at turn start) is
+refused there (`403 login_token_required`, with `hint: request_user_consent`). It may instead
+**request** consent; only the same account's login credential can approve it.
+
+```text
+MCP (model_run) -> POST /api/hermes/cron/consent-requests  { profile, context_id, kind, ... }
+               <- 202 pending_user_consent              (nothing created or run)
+Studio chat card (login) -> approve | deny -> existing executor runs the frozen plan once
+```
+
+- **Authority.** `context_id` names a server-created authority: the current turn's context (the
+  `context_id` in `studio_task_plan_context`; Studio records the account that started the turn) or
+  a setup context the user opened from the chat menu ("Allow MCP scheduled-result setup",
+  `POST /api/hermes/cron/consent-contexts`, login only). A setup context needs no model turn; opening
+  it issues the profile's ordinary runtime credential through the real issuer. It is single use, and
+  opening a new one replaces the account's earlier unused setup context for that session.
+  The destination session, profile, account and frozen generation come from that authority; a body
+  `session_id` or generation is refused (`destination_override_refused`). Invented, ended or
+  background-continuation contexts are refused (`context_unavailable`), as is a context of another
+  account (`context_account_mismatch`).
+- **Credential boundary.** The runtime credential is account-wide by existing architecture. A valid
+  context of another session or profile of the same account can therefore be named; the request
+  then visibly targets that context's session and still needs that account's login approval. This
+  is not isolation between one account's sessions.
+- **Account.** A session attributed to a Studio account accepts requests only for that account; an
+  unattributed session accepts the authorized actor without changing its ownership. Only the
+  requesting account can list, approve or deny (no super-admin override). App, share, server, model
+  API key and pre-purpose tokens cannot request or decide.
+- **Kinds.** `cron_session_binding` + `job_id` (agent-backed, `deliver=local`): approval records the
+  binding with the approving account; the observer stops delivering once that account is disabled or
+  loses profile access. `script_report_enrollment` + `mode: "new"` (`name`, `schedule`, `script`,
+  optional `workdir`, `interpreter`, `paused`) or `mode: "existing"` + `job_id` (adoption above).
+- **Frozen plans.** Approval executes only what was shown. Agent binding: the job configuration
+  fingerprint (run-time bookkeeping excluded) and the binding it replaces are compared and set, so a
+  changed job (`job_changed`) or a binding changed meanwhile (`binding_changed`) is refused instead of
+  last-writer-wins. Scripts: changed bytes or resolution are refused (`target_changed`), never
+  re-hashed as approved. A reset, deleted or recreated session (`session_generation_mismatch`) or an
+  account that lost access is refused at approval and after every native step.
+- **State.** In memory, 10-minute expiry, at most 5 pending requests per account and session. A
+  decision consumes the request synchronously (one winner among concurrent clicks; a wrong account
+  never consumes it). A Studio restart drops all pending requests. Approval is at most one execution
+  attempt in that process; it is not a transaction across the Hermes CLI, files and SQLite, so a
+  failure can leave a paused job, whose id is returned, and nothing is retried automatically.
+- **Mutations.** Consent application, direct binding and Studio's job API (`PATCH/DELETE`, pause,
+  resume) serialize per job, and authorize again once they hold the lock. Native tools and other same-UID processes are outside that lock: a binding subscribes the
+  job's future results and does not freeze the job against later native edits.
 
 ## Terminal completions
 
@@ -360,12 +435,16 @@ question, not the projected text, for every notice-projected turn.
 ```bash
 npx vitest run tests/server/session-notifications-cron.test.ts tests/server/session-notifications-external.test.ts \
   tests/server/script-report-wrapper.test.ts tests/server/script-report-import.test.ts tests/server/script-report-enrollment.test.ts \
-  tests/server/cron-session-bindings.test.ts
+  tests/server/cron-session-bindings.test.ts tests/server/cron-consent.test.ts \
+  tests/client/cron-consent-card.test.ts
 HERMES_REAL_BRIDGE_E2E=1 HERMES_AGENT_ROOT=<read-only hermes checkout> \
   npx vitest run tests/server/hermes-session-notifications-real.test.ts
 npm run build && HERMES_AGENT_ROOT=<read-only hermes checkout> \
   node tests/server/fixtures/session-notifications-e2e.mjs
 npm run build && HERMES_AGENT_ROOT=<read-only hermes checkout> node tests/server/fixtures/script-reports-e2e.mjs
+# Consent journey for both job types: real MCP issuer, browser click, native scheduler.
+npm run build && HERMES_AGENT_ROOT=<read-only hermes checkout> E2E_CHROMIUM=<chromium binary> \
+  node tests/server/fixtures/cron-consent-e2e.mjs
 ```
 
 The real harnesses use disposable `HOME`, `HERMES_HOME`, Web UI home and `TMPDIR`, a
