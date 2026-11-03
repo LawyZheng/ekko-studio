@@ -269,6 +269,7 @@ export interface SessionNoticeEvent {
   message: import('./sessions').HermesMessage & { id: string | number }
 }
 const sessionNoticeHandlers = new Set<(event: SessionNoticeEvent) => void>()
+const cronConsentHandlers = new Set<(sessionId: string) => void>()
 const unobservedRunStartedHandlers = new Set<(event: RunEvent) => void>()
 const personUpdatedHandlers = new Set<(event: RunEvent) => void>()
 const sessionTitleUpdatedHandlers = new Set<(event: RunEvent) => void>()
@@ -740,6 +741,14 @@ export function onPeerUserMessage(handler: (event: RunEvent) => void): () => voi
   }
 }
 
+/** Content-free hint that a session's pending cron consents changed; refetch with a login token. */
+export function onCronConsentUpdated(handler: (sessionId: string) => void): () => void {
+  cronConsentHandlers.add(handler)
+  return () => {
+    cronConsentHandlers.delete(handler)
+  }
+}
+
 export function onSessionNotice(handler: (event: SessionNoticeEvent) => void): () => void {
   sessionNoticeHandlers.add(handler)
   return () => {
@@ -929,6 +938,7 @@ export function connectChatRun(requestedProfile?: string | null, transport: Chat
     on('run.reattach_failed', globalRunReattachFailedHandler)
     on('session.command', globalSessionCommandHandler)
     on('session.notice', (event: any) => { for (const handler of sessionNoticeHandlers) handler(event as SessionNoticeEvent) })
+    on('cron_consent.updated', (event: any) => { for (const handler of cronConsentHandlers) handler(String(event?.session_id || '')) })
     on('session.title.updated', globalSessionTitleUpdatedHandler)
     on('session.workspace.updated', globalSessionWorkspaceUpdatedHandler)
     on('session.settings.updated', globalSessionSettingsUpdatedHandler)
