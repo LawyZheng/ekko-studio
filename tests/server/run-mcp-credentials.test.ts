@@ -113,7 +113,7 @@ it.each(['/api/studio/task-plans/update', '/api/studio/clarifications/request', 
   const next = vi.fn(async () => {})
   await requireUserJwt(ctx, next)
   expect(next).toHaveBeenCalledOnce()
-  expect(ctx.state).toEqual({ profile: { name: 'research' } })
+  expect(ctx.state).toEqual({ profile: { name: 'research' }, credentialKind: 'run' })
   expect(users.findUserById).not.toHaveBeenCalled()
   current = false
   const stale = context(credential, path)

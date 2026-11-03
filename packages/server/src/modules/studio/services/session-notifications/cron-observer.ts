@@ -9,6 +9,7 @@ import {
   type SessionNotificationDisposition,
   type SessionNotificationRecord,
 } from '../../repositories/session-notification-store'
+import { findUserById, userCanAccessProfile } from '../../repositories/users-store'
 
 /** Exact answers are stored whole up to this bound; longer answers are clipped and flagged. */
 export const CRON_NOTICE_MAX_CHARS = 100_000
@@ -124,6 +125,12 @@ function sameBindingRevision(observed: CronSessionBinding, current: CronSessionB
     && current!.stored_deliver === observed.stored_deliver
 }
 
+function bindingAccountCurrent(binding: CronSessionBinding): boolean {
+  if (binding.account_id === null) return true
+  const user = findUserById(binding.account_id)
+  return !!user && user.status === 'active' && (user.role === 'super_admin' || userCanAccessProfile(user.id, binding.profile))
+}
+
 /** One observation pass over every active binding of this Studio instance. */
 export async function observeCronBindings(deps: CronObserverDeps): Promise<SessionNotificationRecord[]> {
   const bindings = readCronSessionBindings(deps.bindingsPath, deps.namespace)
@@ -172,7 +179,8 @@ export async function observeCronBindings(deps: CronObserverDeps): Promise<Sessi
     for (const execution of response.executions || []) {
       const binding = byJob.get(execution.job_id)
       if (!binding || changedTargets.has(execution.job_id) || !isScheduledExecution(execution)) continue
-      const current = bindingOwnerCurrent(binding, deps.getSession(binding.session_id))
+      // A consent binding stops delivering once its approving account loses access.
+      const current = bindingOwnerCurrent(binding, deps.getSession(binding.session_id)) && bindingAccountCurrent(binding)
       const classified = current
         ? classifyCronExecution(execution)
         : { disposition: 'owner_missing' as const, payload: { job_id: execution.job_id, execution_id: execution.execution_id } }

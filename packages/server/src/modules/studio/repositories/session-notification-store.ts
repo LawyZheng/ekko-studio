@@ -291,6 +291,8 @@ export interface CronSessionBinding {
   requested_paused: number
   /** Owner session generation at binding time; null for bindings that predate it (never owned). */
   session_generation: string | null
+  /** Approving account of a consent binding; null for direct login bindings. */
+  account_id: number | null
 }
 
 /** Bindings written by the Agent Bridge cronjob middleware for this Studio instance. */
@@ -306,6 +308,7 @@ export function readCronSessionBindings(path: string, instanceId: string): CronS
       bound_at: Number(row.bound_at),
       requested_paused: Number(row.requested_paused || 0),
       session_generation: row.session_generation ? String(row.session_generation) : null,
+      account_id: row.account_id === null || row.account_id === undefined ? null : Number(row.account_id),
     }))
   } catch (err: any) {
     if (/no such table/i.test(String(err?.message || ''))) return []
