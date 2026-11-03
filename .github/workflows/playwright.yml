@@ -7,7 +7,6 @@ on:
   pull_request:
     branches:
       - main
-      - feat/cron-consent-foundation
 
 permissions:
   contents: read
