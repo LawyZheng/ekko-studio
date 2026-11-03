@@ -126,32 +126,43 @@ def run_cron_admission(capability: str, body: dict[str, Any], deadline_seconds: 
     Bounded: at the deadline the calling thread is interrupted, which Hermes' MCP wait loop honors by
     cancelling the in-flight call; the Studio side refuses the expired authority after any await.
     """
-    try:
-        discovery = importlib.import_module("tools.mcp_tool_discovery")
-    except ModuleNotFoundError:
-        discovery = importlib.import_module("tools.mcp_tool")
-    discovery.discover_mcp_tools([MANAGED_API_SERVER])
-    schema = importlib.import_module("tools.mcp_tool_schema")
-    tool = schema.mcp_prefixed_tool_name(MANAGED_API_SERVER, API_REQUEST_TOOL)
-    handle_function_call = importlib.import_module("model_tools").handle_function_call
     interrupt = importlib.import_module("tools.interrupt")
     thread_id = threading.get_ident()
-    expired = threading.Event()
+    guard = threading.Lock()
+    state = {"done": False, "fired": False}
 
     def expire() -> None:
-        expired.set()
-        interrupt.set_interrupt(True, thread_id)
+        # Under the guard: once the dispatch is done, the timer can no longer set this thread's flag.
+        with guard:
+            if not state["done"]:
+                state["fired"] = True
+                interrupt.set_interrupt(True, thread_id)
 
+    # The budget covers native discovery (cold connect included) and the tool call: both wait in
+    # Hermes' MCP loop, which cancels on this thread's interrupt.
     timer = threading.Timer(deadline_seconds, expire)
     token = CRON_CAPABILITY.set(capability)
     timer.start()
     try:
-        result = handle_function_call(tool, {"method": "POST", "path": CURRENT_SESSION_PATH, "body": body})
+        try:
+            discovery = importlib.import_module("tools.mcp_tool_discovery")
+        except ModuleNotFoundError:
+            discovery = importlib.import_module("tools.mcp_tool")
+        discovery.discover_mcp_tools([MANAGED_API_SERVER])
+        tool = importlib.import_module("tools.mcp_tool_schema").mcp_prefixed_tool_name(MANAGED_API_SERVER, API_REQUEST_TOOL)
+        result = importlib.import_module("model_tools").handle_function_call(
+            tool, {"method": "POST", "path": CURRENT_SESSION_PATH, "body": body})
+    except InterruptedError:
+        if not state["fired"]:
+            raise
+        result = None
     finally:
+        with guard:
+            state["done"] = True
         timer.cancel()
         CRON_CAPABILITY.reset(token)
-        if expired.is_set():
+        if state["fired"]:
             interrupt.set_interrupt(False, thread_id)
-    if expired.is_set():
+    if state["fired"]:
         raise TimeoutError("dispatch_deadline")
     return result if isinstance(result, str) else json.dumps(result)

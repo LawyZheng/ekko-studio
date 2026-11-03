@@ -148,6 +148,40 @@ except TimeoutError as error:
     assert str(error) == 'dispatch_deadline'
 assert time.monotonic() - started < 5 and not interrupted and bridge_mcp.CRON_CAPABILITY.get() is None
 
+# A cold or blocked native discovery spends the same budget: Hermes' discovery wait honors the interrupt.
+def slow_discovery(allowed=None):
+    while not interrupt.is_interrupted():
+        time.sleep(0.01)
+    raise InterruptedError('discovery interrupted')
+discovery.discover_mcp_tools = slow_discovery
+started = time.monotonic()
+try:
+    bridge_mcp.run_cron_admission('studio_run_scope', {'kind': 'cron_job'}, deadline_seconds=0.2)
+    raise AssertionError('discovery outlived the deadline')
+except TimeoutError as error:
+    assert str(error) == 'dispatch_deadline'
+assert time.monotonic() - started < 5 and not interrupted
+discovery.discover_mcp_tools = lambda allowed=None: []
+
+# The timer fires while the native call is completing: its interrupt must never outlive the dispatch.
+firing = threading.Event()
+def late_interrupt(active, thread_id=None, **kw):
+    if active:
+        firing.set()
+        time.sleep(0.3)
+    (interrupted.add if active else interrupted.discard)(thread_id or threading.get_ident())
+interrupt.set_interrupt = late_interrupt
+def finishing_call(name, args, **kwargs):
+    firing.wait(5)
+    return json.dumps({'result': 'done'})
+model_tools.handle_function_call = finishing_call
+try:
+    bridge_mcp.run_cron_admission('studio_run_scope', {'kind': 'cron_job'}, deadline_seconds=0.1)
+except TimeoutError:
+    pass
+time.sleep(0.5)
+assert not interrupted, interrupted
+
 gateway = types.ModuleType('gateway'); gateway.__path__ = []
 session_context = types.ModuleType('gateway.session_context')
 session_context.set_session_vars = lambda **kw: ['token']
@@ -168,7 +202,7 @@ except KeyError:
     pass
 assert not [run for run in pool._runs.values() if run.session_id.startswith('cron-dispatch:')]
 print('ok')
-`], { encoding: 'utf8' })
+`], { encoding: 'utf8', timeout: 30_000 })
     expect(output.trim()).toBe('ok')
   })
 })

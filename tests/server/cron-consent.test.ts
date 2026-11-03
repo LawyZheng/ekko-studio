@@ -21,7 +21,7 @@ let m: any
 let turns: any
 const published: string[] = []
 const guard = { verdict: { ok: true } as any, calls: [] as string[] }
-const cli: { calls: string[][]; jobs: any[]; createGate?: Promise<void>; editGate?: Promise<void>; resumeGate?: Promise<void>; onCreate?: (id: string) => void; onResume?: (job: any) => void; resumeIgnored?: boolean } = { calls: [], jobs: [] }
+const cli: { calls: string[][]; jobs: any[]; createGate?: Promise<void>; editGate?: Promise<void>; resumeGate?: Promise<void>; onCreate?: (id: string) => void; onResume?: (job: any) => void; resumeIgnored?: boolean; pauseFails?: boolean; afterSave?: (command: string) => void } = { calls: [], jobs: [] }
 const users: Record<string, { id: number; token: string; modelRun: string; legacy: string }> = {}
 
 function saveJobs() { mkdirSync(join(hermesHome, 'cron'), { recursive: true }); writeFileSync(join(hermesHome, 'cron', 'jobs.json'), JSON.stringify({ jobs: cli.jobs })) }
@@ -39,7 +39,7 @@ beforeEach(async () => {
   vi.stubEnv('HERMES_WEB_UI_HOME', studioHome)
   vi.stubEnv('HERMES_HOME', hermesHome)
   vi.stubEnv('HERMES_WEB_UI_TEST_DB_DIR', join(root, 'db'))
-  cli.calls = []; cli.resumeIgnored = false; cli.createGate = undefined; cli.editGate = undefined; cli.resumeGate = undefined; cli.onCreate = undefined; cli.onResume = undefined
+  cli.calls = []; cli.resumeIgnored = false; cli.pauseFails = false; cli.afterSave = undefined; cli.createGate = undefined; cli.editGate = undefined; cli.resumeGate = undefined; cli.onCreate = undefined; cli.onResume = undefined
   cli.jobs = [
     { id: 'agent1', name: 'Morning brief', prompt: 'Summarize the news', no_agent: false, deliver: 'local', enabled: true,
       schedule: { kind: 'cron', expr: '0 9 * * *', display: '0 9 * * *' }, schedule_display: '0 9 * * *', repeat: { times: null, completed: 4 },
@@ -74,8 +74,9 @@ beforeEach(async () => {
         if (rest.includes('--schedule')) target.schedule_display = flag('--schedule')
       }
       if (command === 'resume') { await cli.resumeGate; if (!cli.resumeIgnored) target.enabled = true; cli.onResume?.(structuredClone(target)) }
-      if (command === 'pause') target.enabled = false
+      if (command === 'pause') { if (cli.pauseFails) throw new Error('pause failed'); target.enabled = false }
       saveJobs()
+      cli.afterSave?.(command)
       return { stdout: '', stderr: '' }
     },
   }))
@@ -805,6 +806,21 @@ describe('trusted current-session automation', () => {
     cli.resumeIgnored = true
     expect((await admit(capability(), { ...newAgent, name: 'Ignored brief' })).body).toMatchObject({ error: 'native_resume_failed', job_id: 'job5' })
     expect(job('job5').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('an unreadable job after resume is reconciled by its known id: own binding removed, pause attempted, paused state only claimed when read back', async () => {
+    await setPolicy(true)
+    const corrupt = () => writeFileSync(join(hermesHome, 'cron', 'jobs.json'), '{not json')
+    // Resume succeeds, then the readback fails (EIO-like): the job is paused again by its known id.
+    cli.afterSave = command => { if (command === 'resume') corrupt() }
+    expect((await admit(capability(), newAgent)).body).toMatchObject({ error: 'native_resume_uncertain', job_id: 'job4' })
+    expect(commands()).toEqual(['create', 'resume', 'pause'])
+    expect(job('job4').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+    // The pause cannot be confirmed: never reported as paused, the binding is still removed.
+    cli.pauseFails = true
+    expect((await admit(capability(), { ...newAgent, name: 'Unverified brief' })).body).toMatchObject({ error: 'native_pause_unverified', job_id: 'job5' })
     expect(cronBindings()).toEqual([])
   })
 
