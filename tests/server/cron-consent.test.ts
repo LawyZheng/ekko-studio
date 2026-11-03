@@ -21,7 +21,7 @@ let m: any
 let turns: any
 const published: string[] = []
 const guard = { verdict: { ok: true } as any, calls: [] as string[] }
-const cli: { calls: string[][]; jobs: any[]; createGate?: Promise<void>; editGate?: Promise<void>; resumeGate?: Promise<void>; onCreate?: (id: string) => void; onResume?: (job: any) => void } = { calls: [], jobs: [] }
+const cli: { calls: string[][]; jobs: any[]; createGate?: Promise<void>; editGate?: Promise<void>; resumeGate?: Promise<void>; onCreate?: (id: string) => void; onResume?: (job: any) => void; resumeIgnored?: boolean; pauseFails?: boolean; afterSave?: (command: string) => void } = { calls: [], jobs: [] }
 const users: Record<string, { id: number; token: string; modelRun: string; legacy: string }> = {}
 
 function saveJobs() { mkdirSync(join(hermesHome, 'cron'), { recursive: true }); writeFileSync(join(hermesHome, 'cron', 'jobs.json'), JSON.stringify({ jobs: cli.jobs })) }
@@ -39,7 +39,7 @@ beforeEach(async () => {
   vi.stubEnv('HERMES_WEB_UI_HOME', studioHome)
   vi.stubEnv('HERMES_HOME', hermesHome)
   vi.stubEnv('HERMES_WEB_UI_TEST_DB_DIR', join(root, 'db'))
-  cli.calls = []; cli.createGate = undefined; cli.editGate = undefined; cli.resumeGate = undefined; cli.onCreate = undefined; cli.onResume = undefined
+  cli.calls = []; cli.resumeIgnored = false; cli.pauseFails = false; cli.afterSave = undefined; cli.createGate = undefined; cli.editGate = undefined; cli.resumeGate = undefined; cli.onCreate = undefined; cli.onResume = undefined
   cli.jobs = [
     { id: 'agent1', name: 'Morning brief', prompt: 'Summarize the news', no_agent: false, deliver: 'local', enabled: true,
       schedule: { kind: 'cron', expr: '0 9 * * *', display: '0 9 * * *' }, schedule_display: '0 9 * * *', repeat: { times: null, completed: 4 },
@@ -59,8 +59,9 @@ beforeEach(async () => {
       if (command === 'create') {
         await cli.createGate
         const id = `job${cli.jobs.length + 1}`
-        cli.jobs.push({ id, name: flag('--name'), script: flag('--script'), no_agent: rest.includes('--no-agent'), deliver: flag('--deliver'),
-          enabled: !rest.includes('--paused'), schedule_display: rest[rest.length - 1] })
+        const agent = !rest.includes('--no-agent')
+        cli.jobs.push({ id, name: flag('--name'), script: flag('--script'), no_agent: !agent, deliver: flag('--deliver'),
+          enabled: !rest.includes('--paused'), schedule_display: rest[rest.length - (agent ? 2 : 1)], ...(agent ? { prompt: rest[rest.length - 1] } : {}) })
         saveJobs()
         // A job is visible to other writers as soon as Hermes saved it, before this command returns.
         cli.onCreate?.(id)
@@ -72,9 +73,10 @@ beforeEach(async () => {
         if (rest.includes('--script')) target.script = flag('--script')
         if (rest.includes('--schedule')) target.schedule_display = flag('--schedule')
       }
-      if (command === 'resume') { await cli.resumeGate; target.enabled = true; cli.onResume?.(structuredClone(target)) }
-      if (command === 'pause') target.enabled = false
+      if (command === 'resume') { await cli.resumeGate; if (!cli.resumeIgnored) target.enabled = true; cli.onResume?.(structuredClone(target)) }
+      if (command === 'pause') { if (cli.pauseFails) throw new Error('pause failed'); target.enabled = false }
       saveJobs()
+      cli.afterSave?.(command)
       return { stdout: '', stderr: '' }
     },
   }))
@@ -98,6 +100,9 @@ beforeEach(async () => {
     consent: await import(`${HERMES}/services/cron-consent/consent`),
     paths: await import(`${STUDIO}/public/script-report-paths`),
     jobLock: await import(`${HERMES}/services/cron-jobs/job-lock`),
+    trusted: await import(`${STUDIO}/public/trusted-cron`),
+    chatRun: await import(`${STUDIO}/services/chat-run/server-registry`),
+    observer: await import(`${STUDIO}/services/session-notifications/cron-observer`),
   }
   const { TaskPlanRuns } = await import(`${STUDIO}/services/task-plan-runs`)
   turns = new TaskPlanRuns(() => {}, () => {})
@@ -622,6 +627,242 @@ describe('long-lived binding after approval (simulated clock and restart, not re
     expect(delivered.map(record => [record.sessionId ?? record.session_id, record.disposition, record.payload?.content]).sort()).toEqual([
       ['chat-1', 'notified', 'answer from agent1'], ['chat-2', 'notified', 'answer from agent2'],
     ])
+  })
+})
+
+describe('trusted current-session automation', () => {
+  const policy = (token = users.member.token) => call('GET', '/api/hermes/cron/trusted-automation?profile=default', token)
+  const setPolicy = async (enabled: boolean, token = users.member.token, expected?: number) =>
+    call('PUT', '/api/hermes/cron/trusted-automation', token, { profile: 'default', enabled, expected_revision: expected ?? (await policy()).body.revision })
+  const capability = (sessionId = 'chat-1', accountId = users.member.id, active = { live: true }) =>
+    m.trusted.issueTrustedCronCapability({ accountId, profile: 'default', sessionId, isActive: () => active.live })
+  const admit = (token: string, body: Record<string, unknown>) => call('POST', '/api/hermes/cron/current-session', token, { profile: 'default', ...body })
+  const newAgent = { kind: 'cron_job', name: 'Evening brief', schedule: 'every 1h', prompt: 'Summarize the evening' }
+  const fire = (jobId: string, execution: string) => ({ job_id: jobId, execution_id: execution, source: 'builtin', scheduled_instant: '2026-11-04T09:00:00+00:00',
+    status: 'completed', no_agent: false, receipt: 'exact', success: true, answer: `answer ${execution}`, silent: false })
+  async function observe(jobIds: string[], execution: string) {
+    const delivered: any[] = []
+    await m.observer.observeCronBindings({
+      namespace: m.notifications.studioInstanceId(), bindingsPath: m.notifications.cronBindingsDbPath(),
+      observe: async () => ({ jobs: jobIds.map(id => ({ job_id: id, state: 'present', deliver: 'local' })), executions: jobIds.map(id => fire(id, `${execution}-${id}`)) }),
+      getSession: (id: string) => ({ profile: 'default', generation: m.store.getSessionGeneration(id) }),
+      publish: (record: any) => delivered.push([record.payload?.job_id, record.sessionId ?? record.session_id]),
+    })
+    return delivered.sort()
+  }
+
+  it('is off by default; only a login credential of an account with profile access changes it, with CAS and a rotating epoch', async () => {
+    expect((await policy()).body).toMatchObject({ profile: 'default', enabled: false, revision: 0 })
+    expect(capability()).toBeNull()
+    for (const token of [users.member.modelRun, users.member.legacy, users.root.modelRun]) expect((await setPolicy(true, token, 0)).status).toBe(403)
+    expect((await setPolicy(true, users.outsider.token, 0)).status).toBe(403)
+    expect((await setPolicy(true, users.member.token, 0)).body).toMatchObject({ enabled: true, revision: 1 })
+    expect((await setPolicy(false, users.member.token, 0)).body.error).toBe('policy_revision_conflict')
+    expect((await policy(users.peer.token)).body.enabled).toBe(false)
+    expect(capability('peer-1', users.peer.id)).toBeNull()
+    const first = capability()
+    expect(first).toMatch(/^studio_run_/)
+    expect((await setPolicy(false)).body).toMatchObject({ enabled: false, revision: 2 })
+    expect((await setPolicy(true)).body).toMatchObject({ enabled: true, revision: 3 })
+    // An admission authority from the earlier epoch never admits again, even after re-enabling.
+    expect((await admit(first, newScript)).body.error).toBe('trusted_policy_changed')
+    expect(cli.calls).toEqual([])
+  })
+
+  it('admits a new script job and adopts an existing one into the capability session without any approval', async () => {
+    await setPolicy(true)
+    const token = capability()
+    const created = await admit(token, newScript)
+    expect(created).toMatchObject({ status: 201, body: { status: 'admitted', kind: 'script_report_enrollment', session_id: 'chat-1', job_id: 'job4' } })
+    expect((await admit(token, adopt)).status).toBe(201)
+    expect(bindingRows().map((row: any) => [row.job_id, row.session_id, row.state, typeof row.trusted_epoch])).toEqual([
+      ['job4', 'chat-1', 'active', 'string'], ['legacy1', 'chat-1', 'active', 'string'],
+    ])
+    expect(job('job4').enabled).toBe(true)
+    expect((await list()).body.requests).toEqual([])
+  })
+
+  it('creates an agent job paused, binds it and resumes it; binds an unbound job; never takes over an existing binding', async () => {
+    await setPolicy(true)
+    const token = capability()
+    const created = await admit(token, newAgent)
+    expect(created).toMatchObject({ status: 201, body: { status: 'admitted', kind: 'cron_job', session_id: 'chat-1', job_id: 'job4' } })
+    expect(cli.calls[0]).toEqual(expect.arrayContaining(['create', '--paused', '--deliver', 'local', 'Summarize the evening']))
+    expect(commands()).toEqual(['create', 'resume'])
+    expect(job('job4')).toMatchObject({ no_agent: false, deliver: 'local', enabled: true, prompt: 'Summarize the evening' })
+    expect((await admit(token, bindAgent)).status).toBe(201)
+    expect(cronBindings().map((row: any) => [row.job_id, row.session_id, row.account_id, typeof row.trusted_epoch]).sort()).toEqual([
+      ['agent1', 'chat-1', users.member.id, 'string'], ['job4', 'chat-1', users.member.id, 'string'],
+    ])
+    expect((await admit(capability('chat-2'), bindAgent)).body.error).toBe('job_already_bound')
+    expect((await admit(token, { ...newAgent, prompt: '' })).body.error).toBe('invalid_prompt')
+  })
+
+  it('refuses every other credential, destination override, endpoint, profile and a reset session', async () => {
+    await setPolicy(true)
+    const token = capability()
+    for (const other of [users.member.modelRun, users.member.token]) expect((await admit(other, newScript)).status).toBe(403)
+    for (const key of ['session_id', 'sessionId', 'target_session_id', 'context_id', 'account_id', 'user_id', 'expected_session_generation']) {
+      expect((await admit(token, { ...newScript, [key]: 'chat-2' })).body.error).toBe('destination_override_refused')
+    }
+    expect((await call('GET', '/api/hermes/jobs?profile=default', token)).status).toBe(403)
+    expect((await call('POST', '/api/hermes/cron/consent-requests', token, { profile: 'default', context_id: 'x', ...newScript })).status).toBe(403)
+    expect((await call('POST', '/api/hermes/cron/current-session', token, { profile: 'other', ...newScript })).status).toBe(403)
+    expect(capability('peer-1')).toBeNull()
+    m.store.clearSessionMessages('chat-1')
+    expect((await admit(token, newScript)).body.error).toBe('session_generation_mismatch')
+    expect(cli.calls).toEqual([])
+  })
+
+  it('ends with its execution and with the account access', async () => {
+    await setPolicy(true)
+    const active = { live: true }
+    const ended = capability('chat-1', users.member.id, active)
+    active.live = false
+    expect((await admit(ended, newScript)).status).toBe(401)
+    const token = capability('chat-2')
+    m.users.replaceUserProfiles(users.member.id, ['other'])
+    expect((await admit(token, newScript)).status).toBe(403)
+    expect(cli.calls).toEqual([])
+  })
+
+  it('a policy disabled during the native create stops before binding; the created job stays paused and is reported', async () => {
+    await setPolicy(true)
+    const token = capability()
+    let release!: () => void
+    cli.createGate = new Promise(resolve => { release = resolve })
+    const admission = admit(token, newAgent)
+    await until(() => commands().includes('create'), 'native create entered')
+    await setPolicy(false)
+    release()
+    expect((await admission).body).toMatchObject({ error: 'trusted_policy_changed', job_id: 'job4' })
+    expect(job('job4').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('revocation stops policy-created routing, re-enabling does not revive it, and a consent binding keeps delivering', async () => {
+    await setPolicy(true)
+    expect((await admit(capability(), bindAgent)).status).toBe(201)
+    cli.jobs.push({ ...structuredClone(job('agent1')), id: 'agent2', name: 'Consent brief' })
+    saveJobs()
+    await approve((await request(turn('chat-2', users.member.id), { ...bindAgent, job_id: 'agent2' })).body.request_id)
+    expect(await observe(['agent1', 'agent2'], 'e1')).toEqual([['agent1', 'chat-1'], ['agent2', 'chat-2']])
+    await setPolicy(false)
+    expect(await observe(['agent1', 'agent2'], 'e2')).toEqual([['agent2', 'chat-2']])
+    expect(m.inbox.getSessionNotification(m.notifications.studioInstanceId(), 'default', 'cron:agent1:e2-agent1')?.disposition).toBe('policy_revoked')
+    await setPolicy(true)
+    expect(await observe(['agent1', 'agent2'], 'e3')).toEqual([['agent2', 'chat-2']])
+    expect(job('agent1').enabled).toBe(true)
+  })
+
+  it('disabling stops capture of policy-created script bindings only, without pausing their native jobs', async () => {
+    await setPolicy(true)
+    await admit(capability(), newScript)
+    await approve((await request(turn('chat-2', users.member.id), adopt)).body.request_id)
+    const before = commands().length
+    await setPolicy(false)
+    await until(() => bindingRows().some((row: any) => row.state === 'revoked'), 'policy capture revoked')
+    const [policyRow, consentRow] = bindingRows()
+    expect([policyRow.state, consentRow.state]).toEqual(['revoked', 'active'])
+    expect(existsSync(m.paths.scriptReportRevokedMarker(policyRow.binding_id))).toBe(true)
+    expect(existsSync(m.paths.scriptReportRevokedMarker(consentRow.binding_id))).toBe(false)
+    expect(commands().slice(before)).toEqual([])
+    expect(job('job4').enabled).toBe(true)
+  })
+
+  it('an admission whose execution ends during a native create, or before a queued create starts, never binds or resumes', async () => {
+    await setPolicy(true)
+    const first = { live: true }
+    let release!: () => void
+    cli.createGate = new Promise(resolve => { release = resolve })
+    const ending = admit(capability('chat-1', users.member.id, first), newAgent)
+    await until(() => commands().includes('create'), 'native create entered')
+    // A second admission, live while it waits for the profile's creation in flight.
+    let checks = 0
+    const second = { live: true }
+    const queuedToken = m.trusted.issueTrustedCronCapability({ accountId: users.member.id, profile: 'default', sessionId: 'chat-2',
+      isActive: () => { checks += 1; return second.live } })
+    const queued = admit(queuedToken, { ...newAgent, name: 'Queued brief' })
+    // Request authentication and the admission's first check have passed: it is queued on the creation fence.
+    await until(() => checks >= 2, 'queued behind the creation in flight')
+    first.live = false
+    second.live = false
+    release()
+    expect((await ending).body).toMatchObject({ error: 'execution_ended', job_id: 'job4' })
+    expect((await queued).body).toMatchObject({ error: 'execution_ended' })
+    expect(commands()).toEqual(['create'])
+    expect(job('job4').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('verifies the job after resume: a lost acknowledgment is paused again and checked; a resume without effect is reported, never claimed', async () => {
+    await setPolicy(true)
+    // The job was enabled and saved, then the acknowledgment was lost.
+    cli.onResume = () => { saveJobs(); throw new Error('connection reset') }
+    expect((await admit(capability(), newAgent)).body).toMatchObject({ error: 'native_resume_uncertain', job_id: 'job4' })
+    expect(commands()).toEqual(['create', 'resume', 'pause'])
+    expect(job('job4').enabled).toBe(false)
+    cli.onResume = undefined
+    cli.resumeIgnored = true
+    expect((await admit(capability(), { ...newAgent, name: 'Ignored brief' })).body).toMatchObject({ error: 'native_resume_failed', job_id: 'job5' })
+    expect(job('job5').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('an unreadable job after resume is reconciled by its known id: own binding removed, pause attempted, paused state only claimed when read back', async () => {
+    await setPolicy(true)
+    const corrupt = () => writeFileSync(join(hermesHome, 'cron', 'jobs.json'), '{not json')
+    // Resume succeeds, then the readback fails (EIO-like): the job is paused again by its known id.
+    cli.afterSave = command => { if (command === 'resume') corrupt() }
+    expect((await admit(capability(), newAgent)).body).toMatchObject({ error: 'native_resume_uncertain', job_id: 'job4' })
+    expect(commands()).toEqual(['create', 'resume', 'pause'])
+    expect(job('job4').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+    // The pause cannot be confirmed: never reported as paused, the binding is still removed.
+    cli.pauseFails = true
+    expect((await admit(capability(), { ...newAgent, name: 'Unverified brief' })).body).toMatchObject({ error: 'native_pause_unverified', job_id: 'job5' })
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('only a chat socket authenticated with a login credential may carry trusted authority; runtime and legacy JWTs keep ordinary chat', async () => {
+    const { ChatRunSocket } = await import(`${STUDIO}/sockets/chat-run`)
+    const connect = async (token: string) => {
+      const socket = { handshake: { auth: { token }, query: { profile: 'default' } }, data: {} as Record<string, any> }
+      let error: unknown
+      await ChatRunSocket.prototype['authMiddleware'].call({ canAccessProfile: () => true }, socket, (err?: Error) => { error = err })
+      return { error, user: socket.data.user?.id, login: socket.data.loginCredential === true }
+    }
+    expect(await connect(users.member.token)).toEqual({ error: undefined, user: users.member.id, login: true })
+    for (const token of [users.member.modelRun, users.member.legacy]) {
+      expect(await connect(token)).toEqual({ error: undefined, user: users.member.id, login: false })
+    }
+  })
+
+  it('dispatch: a login user starts a single-use, model-free admission for a session it can use', async () => {
+    const dispatched: any[] = []
+    let replay: any
+    m.chatRun.setChatRunServer({
+      ...m.chatRun.getChatRunServer(),
+      // Stands in for the Bridge worker: the native MCP call forwards the frozen arguments with the capability.
+      dispatchCurrentSessionCron: async (input: any) => {
+        dispatched.push({ ...input, capability: typeof input.capability })
+        const result = await call(input.arguments.method, input.arguments.path, input.capability, input.arguments.body)
+        replay = await call(input.arguments.method, input.arguments.path, input.capability, input.arguments.body)
+        return result
+      },
+    })
+    const dispatch = (body: Record<string, unknown>, token = users.member.token) => call('POST', '/api/hermes/cron/current-session/dispatch', token, { profile: 'default', ...body })
+    expect((await dispatch({ session_id: 'chat-1', ...newScript })).body.error).toBe('trusted_policy_disabled')
+    await setPolicy(true)
+    expect((await dispatch({ session_id: 'chat-1', ...newScript }, users.member.modelRun)).status).toBe(403)
+    expect((await dispatch({ session_id: 'peer-1', ...newScript })).body.error).toBe('session_account_mismatch')
+    expect((await dispatch({ session_id: 'chat-1', ...newScript, target_session_id: 'chat-2' })).body.error).toBe('destination_override_refused')
+    const done = await dispatch({ session_id: 'chat-1', ...newScript })
+    expect(done).toMatchObject({ status: 201, body: { status: 'admitted', session_id: 'chat-1', job_id: 'job4' } })
+    expect(dispatched).toEqual([{ profile: 'default', sessionId: 'chat-1', capability: 'string',
+      arguments: { method: 'POST', path: '/api/hermes/cron/current-session', body: { profile: 'default', ...newScript } } }])
+    expect(replay.status).toBe(409)
+    expect(bindingRows()).toHaveLength(1)
   })
 })
 

@@ -10,6 +10,7 @@ import {
   type SessionNotificationRecord,
 } from '../../repositories/session-notification-store'
 import { findUserById, userCanAccessProfile } from '../../repositories/users-store'
+import { trustedCronPolicyCurrent } from '../../public/trusted-cron'
 
 /** Exact answers are stored whole up to this bound; longer answers are clipped and flagged. */
 export const CRON_NOTICE_MAX_CHARS = 100_000
@@ -181,18 +182,23 @@ export async function observeCronBindings(deps: CronObserverDeps): Promise<Sessi
       if (!binding || changedTargets.has(execution.job_id) || !isScheduledExecution(execution)) continue
       // A consent binding stops delivering once its approving account loses access.
       const current = bindingOwnerCurrent(binding, deps.getSession(binding.session_id)) && bindingAccountCurrent(binding)
-      const classified = current
-        ? classifyCronExecution(execution)
-        : { disposition: 'owner_missing' as const, payload: { job_id: execution.job_id, execution_id: execution.execution_id } }
+      // A policy-created binding routes only while its policy epoch is the enabled one; never revived.
+      const policyRevoked = binding.trusted_epoch !== null
+        && (binding.account_id === null || !trustedCronPolicyCurrent(binding.account_id, binding.profile, binding.trusted_epoch))
+      const ref = { job_id: execution.job_id, execution_id: execution.execution_id }
+      const classified = policyRevoked ? { disposition: 'policy_revoked' as const, payload: ref }
+        : current ? classifyCronExecution(execution) : { disposition: 'owner_missing' as const, payload: ref }
+      // Server-authored provenance, rechecked at publication.
+      const provenance = binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch } } : {}
       const record = acceptSessionNotification({
         namespace: deps.namespace,
         profile,
         producerKey: `cron:${execution.job_id}:${execution.execution_id}`,
         sessionId: binding.session_id,
-        sessionGeneration: current ? binding.session_generation : null,
+        sessionGeneration: current && !policyRevoked ? binding.session_generation : null,
         kind: 'cron',
         disposition: classified.disposition,
-        payload: classified.payload,
+        payload: { ...classified.payload, ...provenance },
         attention: VISIBLE.has(classified.disposition),
       })
       if (!record) continue

@@ -51,6 +51,7 @@ import {
 } from '../repositories/session-notification-store'
 import { settleQueuedMachineEvents } from '../services/session-notifications/machine-events'
 import { advanceRunOwnership } from '../services/chat-run/run-ownership'
+import { issueTrustedCronCapability, trustedCronPolicyCurrent } from '../public/trusted-cron'
 import { cronBindingsDbPath, studioInstanceId } from '../public/session-notifications'
 import { importScriptReports } from '../services/session-notifications/script-reports'
 import { bindLegacyAppEvents } from '../services/webhooks/legacy-app-events'
@@ -114,7 +115,7 @@ import type {
   QueuedRun,
   SessionState,
 } from '../services/chat-run/types'
-import { authenticateUserToken, inspectAppUserToken, isAuthEnabled, type AuthenticatedUser } from '../public/auth'
+import { authenticateLoginUserToken, authenticateUserToken, inspectAppUserToken, isAuthEnabled, type AuthenticatedUser } from '../public/auth'
 import { findUserById, userCanAccessProfile } from '../repositories/users-store'
 import { observeRunChatPetEvent } from '../public/pet-events'
 import { observePersonPresenceEvent } from '../services/person/presence'
@@ -621,6 +622,32 @@ export class ChatRunSocket {
     return authority
   }
 
+  /**
+   * Model-free trusted Cron admission for a login dispatch: the Bridge runs the fixed native managed
+   * MCP call with the capability as call metadata, never a chat turn; bounded by its own deadline.
+   */
+  async dispatchCurrentSessionCron(input: { profile: string; sessionId: string; capability: string; arguments: { body: Record<string, unknown> } }) {
+    const bridge = createPrimaryAgentBridge({ timeoutMs: 30_000 })
+    const started = await bridge.studioCronDispatch(input.profile, input.sessionId, input.capability, input.arguments.body)
+    for (const deadline = Date.now() + 110_000; ;) {
+      const run = await bridge.getResult(started.run_id)
+      if (run.status === 'complete') {
+        try {
+          // Hermes wraps the MCP tool text, which is the Studio API response envelope.
+          const outer = JSON.parse(String((run.result as { output?: unknown } | null)?.output ?? ''))
+          const envelope = typeof outer?.result === 'string' ? JSON.parse(outer.result) : outer
+          if (Number.isInteger(envelope?.status)) return { status: envelope.status as number, body: envelope.body ?? null }
+        } catch { /* reported below */ }
+      }
+      if (run.status !== 'running') {
+        const detail = run.error || (run.result as { output?: unknown } | null)?.output
+        return { status: 502, body: { error: 'dispatch_failed', ...(detail ? { detail: String(detail).slice(0, 500) } : {}) } }
+      }
+      if (Date.now() > deadline) return { status: 504, body: { error: 'dispatch_timeout' } }
+      await new Promise(resolve => setTimeout(resolve, 200))
+    }
+  }
+
   /** Content-free hint that the pending cron consents of a session changed; clients refetch. */
   publishCronConsentUpdate(sessionId: string) {
     const session = getSession(sessionId)
@@ -906,6 +933,8 @@ export class ChatRunSocket {
       return next(new Error('Profile access denied'))
     }
     socket.data.user = user
+    // Only an interactive login may carry trusted Cron authority; runtime and legacy JWTs chat as before.
+    socket.data.loginCredential = !!await authenticateLoginUserToken(token || '')
     next()
   }
 
@@ -2034,6 +2063,16 @@ export class ChatRunSocket {
         ? this.beginTaskPlanRun(data.session_id, profile, !data.background_delegation_id, (socket.data?.sessionShare ? undefined : (socket.data?.user as AuthenticatedUser | undefined)?.id))
         : undefined
       if (planContext) data.instructions = [data.instructions, taskPlanRunInstruction()].filter(Boolean).join('\n\n')
+      // Trusted current-session Cron: an admission authority for this live, user-initiated turn of a
+      // login socket whose account enabled the policy. Issued by the run once the session is persisted;
+      // it travels as per-call MCP metadata, never in prompts.
+      const cronAccount = socket.data?.sessionShare ? undefined : (socket.data?.user as AuthenticatedUser | undefined)?.id
+      const cronIssue = planContext && data.session_id && cronAccount !== undefined && socket.data?.loginCredential === true
+        && !data.background_delegation_id && !data.autonomous
+        && ![source, data.session_source].some(value => value === 'group_chat' || value === 'workflow' || value === 'global_agent')
+        ? () => issueTrustedCronCapability({ accountId: cronAccount, profile, sessionId: data.session_id!, contextId: planContext,
+          isActive: () => this.taskPlanRuns.isActive(planContext, profile) }) ?? undefined
+        : undefined
       let fullInstructions = data.instructions
         ? `${getSystemPrompt(undefined, { source, mcpCapabilities })}\n${data.instructions}`
         : getSystemPrompt(undefined, { source, mcpCapabilities })
@@ -2058,7 +2097,7 @@ export class ChatRunSocket {
       }
       try {
         await handleBridgeRun(
-          this.nsp, socket, { ...data, task_plan_context_id: planContext, instructions: fullInstructions, onEvent }, profile,
+          this.nsp, socket, { ...data, task_plan_context_id: planContext, studio_cron_issue: cronIssue, instructions: fullInstructions, onEvent }, profile,
           this.sessionMap, this.bridge,
           skipUserMessage,
           loadSessionStateFromDb,
@@ -2510,6 +2549,11 @@ export class ChatRunSocket {
    * than the state cached on long-lived sockets.
    */
   publishSessionNotice(record: SessionNotificationRecord) {
+    // A policy-created notice goes live only while its policy epoch and session generation still hold.
+    const trusted = (record.payload as { trusted?: { account_id?: unknown; epoch?: unknown } } | undefined)?.trusted
+    if (trusted && !(typeof trusted.account_id === 'number' && typeof trusted.epoch === 'string'
+      && trustedCronPolicyCurrent(trusted.account_id, record.profile, trusted.epoch)
+      && getSessionGeneration(record.session_id) === record.session_generation)) return
     const session = getSession(record.session_id)
     // Caller-supplied and script-reported notices are re-fenced and re-authorized at publication.
     const external = record.kind === 'external' || record.kind === 'script_report'

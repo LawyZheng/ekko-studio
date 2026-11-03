@@ -94,6 +94,8 @@ class BridgeServer:
                 background_delegation_enabled,
                 **({"studio_session_generation": str(req["studio_session_generation"])}
                    if req.get("studio_session_generation") else {}),
+                **({"studio_cron_capability": str(req["studio_cron_capability"])}
+                   if req.get("studio_cron_capability") else {}),
             )
             if req.get("wait"):
                 timeout = float(req.get("timeout", 0) or 0)
@@ -310,6 +312,11 @@ class BridgeServer:
             if action == "process_notification_complete":
                 return self.pool.complete_process_notification(producer_key, claim_id)
             return self.pool.release_process_notification(producer_key, claim_id)
+
+        if action == "studio_cron_dispatch":
+            body = req.get("body")
+            return self.pool.studio_cron_dispatch(str(req.get("session_id") or ""), str(req.get("capability") or ""),
+                                                  body if isinstance(body, dict) else {}, req.get("profile"))
 
         if action == "studio_cron_observe":
             jobs = req.get("jobs")

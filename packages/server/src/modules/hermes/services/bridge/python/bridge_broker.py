@@ -322,7 +322,7 @@ class BridgeBroker:
             )
             return self._forward(profile, req, worker_key)
 
-        if action == "studio_cron_observe":
+        if action in {"studio_cron_observe", "studio_cron_dispatch"}:
             return self._forward(self._normalize_profile(req.get("profile")), req)
 
         if action in {"background_notification_complete", "background_notification_release"}:

@@ -26,6 +26,8 @@ export interface ScriptReportBinding {
   error: string | null
   created_at: number
   updated_at: number
+  /** Trusted-automation policy epoch that created this binding; null for consent and login enrollments. */
+  trusted_epoch: string | null
 }
 
 export interface ScriptReportInvocation {
@@ -58,6 +60,8 @@ function database() {
       PRIMARY KEY(binding_id, invocation_id)
     );
   `)
+  const columns = new Set((db.prepare('PRAGMA table_info(script_report_bindings)').all() as Array<{ name: string }>).map(column => column.name))
+  if (!columns.has('trusted_epoch')) db.exec('ALTER TABLE script_report_bindings ADD COLUMN trusted_epoch TEXT')
   initialized.add(db)
   return db
 }
@@ -79,17 +83,19 @@ function toBinding(row: Record<string, unknown>): ScriptReportBinding {
     error: row.error == null ? null : String(row.error),
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
+    trusted_epoch: row.trusted_epoch == null ? null : String(row.trusted_epoch),
   }
 }
 
-export function insertScriptReportBinding(binding: Omit<ScriptReportBinding, 'created_at' | 'updated_at' | 'state' | 'error' | 'job_id'>): ScriptReportBinding {
+export function insertScriptReportBinding(binding: Omit<ScriptReportBinding, 'created_at' | 'updated_at' | 'state' | 'error' | 'job_id' | 'trusted_epoch'>
+  & { trusted_epoch?: string | null }): ScriptReportBinding {
   const now = Date.now()
   database().prepare(`INSERT INTO script_report_bindings
       (binding_id, revision, namespace, profile, session_id, session_generation, account_id, job_id, job_name,
-       target_script, wrapper_script, state, error, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'enrolling', NULL, ?, ?)`).run(binding.binding_id, binding.revision,
+       target_script, wrapper_script, state, error, created_at, updated_at, trusted_epoch)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'enrolling', NULL, ?, ?, ?)`).run(binding.binding_id, binding.revision,
     binding.namespace, binding.profile, binding.session_id, binding.session_generation, binding.account_id,
-    binding.job_name, binding.target_script, binding.wrapper_script, now, now)
+    binding.job_name, binding.target_script, binding.wrapper_script, now, now, binding.trusted_epoch ?? null)
   return getScriptReportBinding(binding.binding_id)!
 }
 

@@ -9,6 +9,7 @@ import { resolveHermesInstallationEnvironment } from '../runtime/installation'
 import { detectHermesHome, getHermesBin } from '../runtime/path'
 import { AgentBridgeClient, DEFAULT_AGENT_BRIDGE_ENDPOINT } from './client'
 import { prepareConfiguredCopilotRuntime } from '../providers/copilot-runtime'
+import { managedMcpLaunch } from '../mcp/studio-autoinject'
 
 const DEFAULT_AGENT_BRIDGE_STARTUP_TIMEOUT_MS = 120000
 const DEFAULT_AGENT_BRIDGE_RESTART_DELAY_MS = 1000
@@ -108,6 +109,8 @@ export function buildAgentBridgeProcessEnv(endpoint: string, hermesHome: string 
       HERMES_WEBUI_STATE_DIR: config.appHome,
       ELECTRON_RUN_AS_NODE: '1',
     }),
+    // Studio's own launch of its managed API server: the only identity trusted Cron metadata goes to.
+    HERMES_AGENT_BRIDGE_STUDIO_MCP_LAUNCH: JSON.stringify(managedMcpLaunch('api')),
     HERMES_OPENROUTER_APP_REFERER: process.env.HERMES_OPENROUTER_APP_REFERER || OPENROUTER_WEB_UI_ATTRIBUTION_ENV.HERMES_OPENROUTER_APP_REFERER,
     HERMES_OPENROUTER_APP_TITLE: process.env.HERMES_OPENROUTER_APP_TITLE || OPENROUTER_WEB_UI_ATTRIBUTION_ENV.HERMES_OPENROUTER_APP_TITLE,
     HERMES_OPENROUTER_APP_CATEGORIES: process.env.HERMES_OPENROUTER_APP_CATEGORIES || OPENROUTER_WEB_UI_ATTRIBUTION_ENV.HERMES_OPENROUTER_APP_CATEGORIES,
