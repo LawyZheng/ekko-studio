@@ -47,6 +47,7 @@ export function beginScriptReportBinding(input: {
   jobName: string
   targetScript: string
   wrapperScript: string
+  trustedEpoch?: string | null
 }): ScriptReportBinding {
   return insertScriptReportBinding({
     binding_id: input.bindingId,
@@ -59,6 +60,7 @@ export function beginScriptReportBinding(input: {
     job_name: input.jobName,
     target_script: input.targetScript,
     wrapper_script: input.wrapperScript,
+    trusted_epoch: input.trustedEpoch ?? null,
   })
 }
 
@@ -88,6 +90,12 @@ export function noteScriptReportBindingError(bindingId: string, error: string | 
 /** Revocation is final: a revoked binding never becomes active again. */
 export function revokeScriptReportBinding(bindingId: string): boolean {
   return transitionScriptReportBinding(bindingId, ['active', 'enrolling', 'failed'], 'revoked')
+}
+
+/** Bindings a trusted-automation policy epoch created for this account and profile. */
+export function listTrustedScriptReportBindings(accountId: number, profile: string, epoch: string): ScriptReportBinding[] {
+  return listScriptReportBindings(studioInstanceId(), profile)
+    .filter(binding => binding.account_id === accountId && binding.trusted_epoch === epoch && (binding.state === 'active' || binding.state === 'enrolling'))
 }
 
 export function findScriptReportBinding(bindingId: string): ScriptReportBinding | null {

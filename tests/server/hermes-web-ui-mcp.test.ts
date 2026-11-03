@@ -1268,4 +1268,44 @@ describe('hermes-web-ui MCP server', () => {
     expect(['profile', 'context_id', 'kind'].every(name => fields[name]?.required)).toBe(true)
     expect(fields).not.toHaveProperty('session_id')
   })
+
+  it('authorizes trusted current-session Cron admission only with the per-call Studio metadata, never a profile token', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-web-ui-mcp-'))
+    homes.push(home)
+    mkdirSync(join(home, 'profiles', 'research'), { recursive: true })
+    writeFileSync(join(home, 'profiles', 'research', '.model-run-token'), 'profile-token\n')
+    const seen: Array<{ url?: string; authorization?: string }> = []
+    const server = createServer((req, res) => {
+      seen.push({ url: req.url, authorization: req.headers.authorization })
+      res.setHeader('content-type', 'application/json')
+      res.end(req.url === '/api/openapi.json' ? '{"paths":{"/api/hermes/jobs":{"post":{"tags":["Jobs"]}}}}' : '{"status":"admitted"}')
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address')
+    const responses = new Map<number, any>()
+    child = spawn(process.execPath, ['bin/ekko-studio-mcp.mjs', 'api'], {
+      cwd: process.cwd(), env: { ...process.env, HERMES_WEB_UI_URL: `http://127.0.0.1:${address.port}`, HERMES_WEB_UI_HOME: home,
+        HERMES_WEB_UI_PROFILE: 'research', AUTH_TOKEN: '', HERMES_WEB_UI_TOKEN: '', HERMES_MCP_TOOLSET: '' },
+    })
+    child.stdout.on('data', chunk => {
+      for (const line of String(chunk).trim().split('\n')) if (line) { const message = JSON.parse(line); responses.set(message.id, message) }
+    })
+    const admission = { method: 'POST', path: '/api/hermes/cron/current-session', body: { profile: 'research', kind: 'cron_job' } }
+    const meta = { 'ekko.studio/cron-capability': 'studio_run_capability' }
+    writeRpc(child, 1, 'initialize', {})
+    writeRpc(child, 2, 'tools/call', { name: 'ekko_studio_api_request', arguments: admission, _meta: meta })
+    const admitted = JSON.parse((await waitForRpc(responses, 2)).result.content[0].text)
+    writeRpc(child, 3, 'tools/call', { name: 'ekko_studio_api_request', arguments: admission })
+    const missing = JSON.parse((await waitForRpc(responses, 3)).result.content[0].text)
+    writeRpc(child, 4, 'tools/call', { name: 'ekko_studio_api_request', arguments: { method: 'POST', path: '/api/hermes/jobs', body: {} }, _meta: meta })
+    await waitForRpc(responses, 4)
+    server.close()
+    expect(admitted.status).toBe(200)
+    expect(missing).toMatchObject({ status: 403, body: { error: 'trusted_capability_unavailable' } })
+    const admissionCalls = seen.filter(item => item.url === '/api/hermes/cron/current-session')
+    expect(admissionCalls).toEqual([{ url: '/api/hermes/cron/current-session', authorization: 'Bearer studio_run_capability' }])
+    // The capability never leaves the admission path: other requests keep the ordinary profile credential.
+    expect(seen.find(item => item.url === '/api/hermes/jobs')?.authorization).toBe('Bearer profile-token')
+  })
 })

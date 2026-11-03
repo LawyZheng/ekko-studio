@@ -496,7 +496,7 @@ async function ensureBridgeFixedContext(args: {
 export async function handleBridgeRun(
   nsp: ReturnType<Server['of']>,
   socket: Socket,
-  data: { task_plan_context_id?: string; input: string | ContentBlock[]; display_input?: string | ContentBlock[] | null; display_role?: 'user' | 'command' | 'system'; storage_message?: string; session_id?: string; model?: string; provider?: string; model_groups?: RunModelGroup[]; instructions?: string; workspace?: string | null; category_id?: number | null; source?: string; session_source?: 'global_agent' | 'workflow' | 'group_chat'; queue_id?: string; peerExcludeSocketId?: string; reasoning_effort?: string; push_enabled?: boolean; background_delegation_enabled?: boolean; one_shot_model?: boolean; background_delegation_id?: string; background_claim_id?: string; autonomous?: boolean; run_marker?: string; machine_fence?: () => string | null; on_machine_dispatch?: () => void; on_machine_discard?: (reason: string) => void; onEvent?: (event: string, payload: any) => void },
+  data: { task_plan_context_id?: string; studio_cron_capability?: string; input: string | ContentBlock[]; display_input?: string | ContentBlock[] | null; display_role?: 'user' | 'command' | 'system'; storage_message?: string; session_id?: string; model?: string; provider?: string; model_groups?: RunModelGroup[]; instructions?: string; workspace?: string | null; category_id?: number | null; source?: string; session_source?: 'global_agent' | 'workflow' | 'group_chat'; queue_id?: string; peerExcludeSocketId?: string; reasoning_effort?: string; push_enabled?: boolean; background_delegation_enabled?: boolean; one_shot_model?: boolean; background_delegation_id?: string; background_claim_id?: string; autonomous?: boolean; run_marker?: string; machine_fence?: () => string | null; on_machine_dispatch?: () => void; on_machine_discard?: (reason: string) => void; onEvent?: (event: string, payload: any) => void },
   profile: string,
   sessionMap: Map<string, SessionState>,
   bridge: AgentBridgeClient,
@@ -905,6 +905,7 @@ export async function handleBridgeRun(
         background_delegation_enabled: backgroundDelegationEnabled,
         // Exact owner generation: cron jobs this turn creates are bound to it.
         ...(sessionGeneration ? { studio_session_generation: sessionGeneration } : {}),
+        ...(data.studio_cron_capability ? { studio_cron_capability: data.studio_cron_capability } : {}),
         // Local patch (reasoning-effort): per-session reasoning effort override.
         ...(runMetadata.originContext.reasoningEffort
           ? { reasoning_effort: runMetadata.originContext.reasoningEffort }

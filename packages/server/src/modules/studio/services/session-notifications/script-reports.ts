@@ -19,6 +19,7 @@ import {
 } from '../../repositories/script-report-store'
 import { getSession } from '../../repositories/session-store'
 import { findUserById, userCanAccessProfile } from '../../repositories/users-store'
+import { trustedCronPolicyCurrent } from '../../public/trusted-cron'
 
 /** Bounds shared with the generated wrapper (assets/script-reports/ekko_script_report_wrapper.py). */
 const TOMBSTONE_PREFIX = '.ack-'
@@ -213,6 +214,8 @@ function ownerVerdict(binding: ScriptReportBinding): string | null {
   if (!user || user.status !== 'active' || (user.role !== 'super_admin' && !userCanAccessProfile(user.id, binding.profile))) {
     return 'account_forbidden'
   }
+  // A policy-created binding imports only under its own, still enabled policy epoch.
+  if (binding.trusted_epoch !== null && !trustedCronPolicyCurrent(binding.account_id, binding.profile, binding.trusted_epoch)) return 'policy_revoked'
   const session = getSession(binding.session_id)
   if (!session || (session.profile || 'default') !== binding.profile || !isScriptReportTarget(session)) return 'owner_missing'
   return null
@@ -347,6 +350,7 @@ export function importScriptReports(options: { namespace?: string; limit?: numbe
           started_at: report.started_at,
           finished_at: report.finished_at,
           content: content ?? '',
+          ...(binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch } } : {}),
         },
       })
       if (!('record' in result)) {

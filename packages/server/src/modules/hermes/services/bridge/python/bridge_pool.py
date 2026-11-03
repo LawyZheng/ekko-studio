@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import copy
 import inspect
 import json
@@ -1312,6 +1313,42 @@ class AgentPool:
     def studio_cron_observe(self, jobs: list[dict[str, Any]], profile: str | None = None) -> dict[str, Any]:
         return _studio_notifications().observe_cron_jobs(jobs, self._db.get_for_profile(profile))
 
+    def studio_cron_dispatch(self, session_id: str, capability: str, body: dict[str, Any], profile: str | None = None) -> dict[str, Any]:
+        """Start the fixed model-free Cron admission for one Studio session; poll `get_result`.
+
+        A bounded worker outside any chat session (no agent, no conversation), so the control thread
+        stays responsive while the native MCP call runs.
+        """
+        if not session_id or not str(capability).startswith("studio_run_") or not isinstance(body, dict):
+            raise ValueError("invalid cron dispatch")
+        record = RunRecord(run_id=uuid.uuid4().hex, session_id=f"cron-dispatch:{uuid.uuid4().hex}")
+        with self._lock:
+            self._runs[record.run_id] = record
+
+        def run() -> None:
+            tokens: list = []
+            try:
+                with _profile_env(profile):
+                    tokens = _set_bridge_session_vars(session_id, profile, "", False)
+                    from bridge_mcp import run_cron_admission
+                    output = run_cron_admission(str(capability), body)
+                record.result = {"output": output}
+                record.status = "complete"
+            except Exception as exc:
+                record.error = str(exc)
+                record.result = {"error": str(exc)}
+                record.status = "error"
+            finally:
+                if tokens:
+                    from gateway.session_context import clear_session_vars
+                    clear_session_vars(tokens)
+                record.ended_at = time.time()
+
+        thread = threading.Thread(target=run, daemon=True, name=f"hermes-cron-dispatch-{record.run_id[:8]}")
+        record.worker_thread = thread
+        thread.start()
+        return {"run_id": record.run_id, "session_id": record.session_id, "status": "running"}
+
     def complete_background_notification(self, delegation_id: str, claim_id: str) -> dict[str, Any]:
         from tools.async_delegation import complete_completion_delivery
 
@@ -1868,6 +1905,7 @@ class AgentPool:
         reasoning_effort: str | None = None,
         background_delegation_enabled: bool | None = None,
         studio_session_generation: str | None = None,
+        studio_cron_capability: str | None = None,
     ) -> RunRecord:
         # The owner generation this turn runs under; cron bindings made by this turn carry it.
         _studio_notifications().set_session_generation(session_id, studio_session_generation)
@@ -1914,9 +1952,14 @@ class AgentPool:
                 if session_cwd_bound:
                     _clear_session_workspace_cwd()
 
+        # This turn's trusted Cron admission authority, visible to this run's thread and tool calls only.
+        run_context = contextvars.copy_context()
+        if studio_cron_capability:
+            from bridge_mcp import CRON_CAPABILITY
+            run_context.run(CRON_CAPABILITY.set, studio_cron_capability)
         thread = threading.Thread(
-            target=self._run_chat,
-            args=(session, record, message, storage_message, instructions, conversation_history, profile, force_compress, workspace, source, reasoning_effort),
+            target=run_context.run,
+            args=(self._run_chat, session, record, message, storage_message, instructions, conversation_history, profile, force_compress, workspace, source, reasoning_effort),
             daemon=True,
             name=f"hermes-bridge-run-{run_id[:8]}",
         )

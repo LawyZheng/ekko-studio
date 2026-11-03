@@ -308,6 +308,51 @@ Studio chat card (login) -> approve | deny -> existing executor runs the frozen 
   resume) serialize per job, and authorize again once they hold the lock. Native tools and other same-UID processes are outside that lock: a binding subscribes the
   job's future results and does not freeze the job against later native edits.
 
+## Trusted current-session automation (opt-in)
+
+Like a messaging gateway, an account can let its chats set up recurring Cron delivery into the
+**current** session without a per-job approval. Off by default, per Studio instance, account and
+profile; consent requests stay the default everywhere else.
+
+```text
+GET /api/hermes/cron/trusted-automation?profile=P          -> { profile, enabled, revision, updated_at }
+PUT /api/hermes/cron/trusted-automation  { profile, enabled, expected_revision }   (login only)
+```
+
+- **Control.** Only an interactive login credential of an account with access to the profile reads
+  or changes its own policy (compare-and-set on `revision`, `409 policy_revision_conflict`). Runtime,
+  run, App, share, server and pre-purpose tokens are refused, including a super administrator's
+  runtime credential. Every change of `enabled` rotates an opaque epoch. No settings UI is needed;
+  operators call the endpoint with their login token.
+- **Authority.** While the policy is on, Studio issues an admission authority for each live chat
+  turn of that account: bound to the turn, session, generation, account, profile and policy epoch,
+  held in memory only and revoked when the turn ends. The Bridge attaches it per call as MCP
+  `_meta` to Studio's verified managed API server only; the model never sees it and it is never
+  written to a file. Without it (policy off, another account's turn, a group, workflow, background
+  or shared run) `POST /api/hermes/cron/current-session` is unavailable; the profile token is never
+  a fallback.
+- **Admission.** `POST /api/hermes/cron/current-session` with `kind: "cron_job"` (`name`,
+  `schedule`, `prompt`: native create paused and local, bind, resume),
+  `"cron_session_binding"` + `job_id` (an unbound agent job; a bound one is refused
+  `job_already_bound`), or `"script_report_enrollment"` (`mode` new or existing, as above). The
+  destination is always the authority's session: `session_id`, `target_session_id`, `context_id`,
+  account, generation or `deliver` fields are refused (`destination_override_refused`). Policy epoch,
+  account access, session ownership and generation are rechecked after every native await before
+  binding or resume. Creating an agent job is not atomic: a failure after creation leaves it paused
+  and reports its `job_id`.
+- **Model-free setup.** `POST /api/hermes/cron/current-session/dispatch` (login only,
+  `{ profile, session_id, kind, ... }`) runs the same admission once, for a session the caller can
+  use, through a bounded Bridge worker that calls the managed API tool natively — no agent, no model
+  request. Its authority is single use and ends with the run.
+- **Delivery and revocation.** Bindings record the creating epoch. Delivery (observer, script
+  import and live publication) continues only while that epoch is the enabled one and the account
+  keeps access; restoring access resumes it, re-enabling the policy does not (new epoch). Disabling
+  stops capture of policy-created script bindings (their native jobs keep running and the wrapper
+  passes through) and policy-created agent results are recorded as `policy_revoked`; established
+  native jobs are not paused, so agent jobs keep using their model locally until the user pauses or
+  removes them. Consent and direct bindings are unaffected. A session reset or deletion ends
+  delivery as usual; notices accepted earlier remain history.
+
 ## Terminal completions
 
 The bridge previously re-queued every non-delegation event, so `notify_on_complete`
