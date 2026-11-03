@@ -1125,6 +1125,7 @@ export default {
       staysPaused: "Reste en pause",
       currentBinding: "Livre actuellement à",
       movesFrom: "Déplace la livraison depuis « {session} »",
+      otherSession: "Les résultats vont vers cette autre discussion, pas vers celle qui affiche cette demande.",
       requestedVia: "Demandé avec",
       viaRuntime: "Identifiant d'exécution MCP",
       viaLogin: "Connexion Studio",
@@ -1144,6 +1145,11 @@ export default {
         create_job: "Créer une tâche de script planifiée qui rend compte à cette conversation",
         modify_job: "Faire rendre compte une tâche de script existante à cette conversation (mise en pause, encapsulée puis reprise)",
         subscribe_job: "Livrer à cette conversation les résultats d'une tâche cron d'agent existante",
+      },
+      actionOther: {
+        create_job: "Créer une tâche de script planifiée qui rend compte à la discussion indiquée ci-dessous",
+        modify_job: "Faire rendre compte une tâche de script existante à la discussion indiquée ci-dessous (la tâche est suspendue, encapsulée puis reprise)",
+        subscribe_job: "Livrer les résultats d'une tâche cron d'agent existante à la discussion indiquée ci-dessous",
       },
     },
     sessionNotice: {

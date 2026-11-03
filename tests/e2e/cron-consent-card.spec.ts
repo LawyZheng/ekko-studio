@@ -46,6 +46,22 @@ for (const brightness of ['light', 'dark'] as const) {
   }
 }
 
+test('cron consent card in the origin chat names a different target chat by title, stable id and profile', async ({ page }) => {
+  await authenticate(page, TEST_ACCESS_KEY, 'research')
+  const api = await mockExistingHermesChat(page)
+  const cross = { ...pending, target: { session_id: 'weekly-target-chat', profile: 'research', title: 'Weekly <b>notes</b>' } }
+  await page.route('**/api/hermes/cron/consent-requests?*', route => route.fulfill({ json: { requests: [cross] } }))
+  await page.goto('/#/hermes/chat')
+  const request = page.getByTestId('cron-consent-card').getByTestId('cron-consent-request')
+  await expect(request).toContainText('Create a scheduled script job that reports to the chat named below')
+  const target = request.getByTestId('cron-consent-target')
+  await expect(target).toContainText('Weekly <b>notes</b> · weekly-target-chat · research')
+  await expect(target).toContainText('Results go to this other chat, not the one showing this request.')
+  await expect(target.locator('b')).toHaveCount(0)
+  await expect(request).not.toContainText('Existing Hermes conversation · research')
+  expect(api.unexpectedRequests).toEqual([])
+})
+
 for (const brightness of ['light', 'dark'] as const) {
   test(`cron consent card paints the registered translucent card surface over a wallpaper (${brightness})`, async ({ page }) => {
     await authenticate(page, TEST_ACCESS_KEY, 'research')

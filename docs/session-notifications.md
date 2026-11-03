@@ -270,6 +270,15 @@ Studio chat card (login) -> approve | deny -> existing executor runs the frozen 
   `session_id` or generation is refused (`destination_override_refused`). Invented, ended or
   background-continuation contexts are refused (`context_unavailable`), as is a context of another
   account (`context_account_mismatch`).
+- **Cross-session target.** An optional `target_session_id` asks for delivery into another session.
+  The context stays the origin authority: the request, its card, capacity and refresh hints stay in
+  the context's session, and the card names the target by title, stable id and profile. The target
+  must be a session of the same profile attributed to the requesting account; unknown or
+  other-profile (`target_session_not_found`), unattributed (`target_session_unattributed`) and
+  other-account (`target_session_account_mismatch`) targets are refused. Its generation is frozen at
+  request time and rechecked, with the origin, at approval, once the job lock is held, and after the
+  native create/edit awaits before the job is activated or resumed. Naming the context's own session
+  is the same-session request.
 - **Credential boundary.** The runtime credential is account-wide by existing architecture. A valid
   context of another session or profile of the same account can therefore be named; the request
   then visibly targets that context's session and still needs that account's login approval. This
@@ -287,7 +296,9 @@ Studio chat card (login) -> approve | deny -> existing executor runs the frozen 
   changed job (`job_changed`) or a binding changed meanwhile (`binding_changed`) is refused instead of
   last-writer-wins. Scripts: changed bytes or resolution are refused (`target_changed`), never
   re-hashed as approved. A reset, deleted or recreated session (`session_generation_mismatch`) or an
-  account that lost access is refused at approval and after every native step.
+  account that lost access is refused at approval, once the job lock is held, and after the native
+  create/edit awaits before activation or resume (an adoption's initial pause can precede its next
+  check; nothing is activated without one).
 - **State.** In memory, 10-minute expiry, at most 5 pending requests per account and session. A
   decision consumes the request synchronously (one winner among concurrent clicks; a wrong account
   never consumes it). A Studio restart drops all pending requests. Approval is at most one execution
