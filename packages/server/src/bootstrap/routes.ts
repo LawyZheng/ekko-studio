@@ -52,6 +52,7 @@ import { downloadRoutes } from '../modules/studio/routes/download'
 import { jobRoutes } from '../modules/hermes/routes/jobs'
 import { cronSessionBindingRoutes } from '../modules/hermes/routes/cron-session-bindings'
 import { scriptReportRoutes } from '../modules/hermes/routes/script-reports'
+import { cronConsentRoutes } from '../modules/hermes/routes/cron-consent'
 import { cronHistoryRoutes } from '../modules/hermes/routes/cron-history'
 import { kanbanRoutes } from '../modules/hermes/routes/kanban'
 import { workflowRoutes } from '../modules/studio/routes/workflows'
@@ -148,6 +149,7 @@ export function registerRoutes(app: any, authMiddleware: Array<(ctx: Context, ne
   app.use(jobRoutes.routes())
   app.use(cronSessionBindingRoutes.routes())
   app.use(scriptReportRoutes.routes())
+  app.use(cronConsentRoutes.routes())
   app.use(cronHistoryRoutes.routes())
   app.use(kanbanRoutes.routes())
   app.use(workflowRoutes.routes())
