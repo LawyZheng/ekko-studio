@@ -452,7 +452,9 @@ export async function requireUserJwt(ctx: Context, next: Next): Promise<void> {
       ctx.state.user = toAuthenticatedUser(user)
       ctx.state.profile = { name: binding.profile }
       ctx.state.credentialKind = 'run'
-      ctx.state.cronAdmission = { ...binding.cron, sessionId: binding.sessionId, profile: binding.profile, token }
+      ctx.state.cronAdmission = { ...binding.cron, sessionId: binding.sessionId, profile: binding.profile, token,
+        // The issuing turn or dispatch must still hold at every later admission step.
+        isActive: () => runMcpCredentials.authenticate(token) !== undefined }
       await next()
       return
     }

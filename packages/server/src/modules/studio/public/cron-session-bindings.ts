@@ -57,6 +57,17 @@ function openBindings(): DatabaseSync {
   return db
 }
 
+/** Remove the job's binding while it still points at `sessionId`: an admission undoing its own write. */
+export function removeCronSessionBinding(profile: string, jobId: string, sessionId: string): void {
+  const db = openBindings()
+  try {
+    db.prepare('DELETE FROM cron_session_bindings WHERE instance_id=? AND profile=? AND job_id=? AND session_id=?')
+      .run(studioInstanceId(), profile, jobId, sessionId)
+  } finally {
+    db.close()
+  }
+}
+
 /** The job's current binding revision in this Studio instance, or null. */
 export function readCronBindingRevision(profile: string, jobId: string): CronBindingRevision | null {
   const db = openBindings()

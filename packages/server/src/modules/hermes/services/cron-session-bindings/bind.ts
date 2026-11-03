@@ -1,6 +1,7 @@
 import {
   authorizeNoticeDestination,
   readCronBindingRevision,
+  removeCronSessionBinding,
   writeCronSessionBinding,
   type CronBindingRevision,
 } from '../../../studio/public/cron-session-bindings'
@@ -105,6 +106,9 @@ export function createBoundAgentJob(input: { profile: string; name: string; sche
   destination: AgentBindingDestination, runner: HermesCronRunner = defaultCronRunner) {
   const { profile, name, schedule, prompt } = input
   const create = async () => {
+    // Possibly queued behind another creation: the authority must still hold before this one starts.
+    assertBindingDestination(destination.userId, profile, destination.sessionId, destination.generation)
+    destination.recheck?.()
     let output: { stdout: string; stderr: string }
     try {
       output = await runner(profile, ['create', '--name', name, '--deliver', 'local', '--paused', '--paused-reason', 'Ekko current-session cron', schedule, prompt])
@@ -125,13 +129,30 @@ export function createBoundAgentJob(input: { profile: string; name: string; sche
       if (!job || job.no_agent === true || job.deliver !== 'local' || job.enabled !== false || job.name !== name || job.prompt !== prompt) {
         throw new CronBindingError(502, 'native_config_mismatch')
       }
-      const binding = applyAgentBinding({ profile, jobId, name, schedule, prompt, jobFingerprint: jobFingerprint(job), prior: null }, destination)
-      await runner(profile, ['resume', jobId]).catch(() => { throw new CronBindingError(502, 'native_resume_failed') })
+      const fingerprint = jobFingerprint(job)
+      const binding = applyAgentBinding({ profile, jobId, name, schedule, prompt, jobFingerprint: fingerprint, prior: null }, destination)
+      // From here the job and its binding are this operation's own: a failure reconciles exactly them,
+      // reporting the paused state only once it is read back.
+      const settle = async (code: string, status = 502): Promise<never> => {
+        if (readNativeJob(profile, jobId)?.enabled !== false) await runner(profile, ['pause', jobId]).catch(() => undefined)
+        const paused = readNativeJob(profile, jobId)?.enabled === false
+        removeCronSessionBinding(profile, jobId, destination.sessionId)
+        throw new CronBindingError(paused ? status : 502, paused ? code : 'native_pause_unverified')
+      }
+      let acknowledged = true
+      await runner(profile, ['resume', jobId]).catch(() => { acknowledged = false })
+      const resumed = readNativeJob(profile, jobId)
+      if (resumed?.enabled !== true) {
+        removeCronSessionBinding(profile, jobId, destination.sessionId)
+        throw new CronBindingError(502, 'native_resume_failed')
+      }
+      if (!acknowledged) await settle('native_resume_uncertain')
+      if (jobFingerprint(resumed) !== fingerprint) await settle('native_config_mismatch')
       try {
         assertBindingDestination(destination.userId, profile, destination.sessionId, destination.generation)
         destination.recheck?.()
       } catch (error) {
-        await runner(profile, ['pause', jobId]).catch(() => undefined)
+        if (error instanceof CronBindingError) await settle(error.code, error.status)
         throw error
       }
       return { ...binding, resumed: true }

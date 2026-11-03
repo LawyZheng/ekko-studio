@@ -1308,4 +1308,26 @@ describe('hermes-web-ui MCP server', () => {
     // The capability never leaves the admission path: other requests keep the ordinary profile credential.
     expect(seen.find(item => item.url === '/api/hermes/jobs')?.authorization).toBe('Bearer profile-token')
   })
+
+  it('compact discovery of the generated catalog lists the trusted current-session operation fields', async () => {
+    const openapi = readFileSync(join(process.cwd(), 'docs', 'openapi.json'), 'utf8')
+    const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(openapi) })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address')
+    const responses = new Map<number, any>()
+    child = spawn(process.execPath, ['bin/ekko-studio-mcp.mjs', 'api'], {
+      cwd: process.cwd(), env: { ...process.env, HERMES_WEB_UI_URL: `http://127.0.0.1:${address.port}`, AUTH_TOKEN: 'test-token', HERMES_MCP_TOOLSET: '' },
+    })
+    child.stdout.on('data', chunk => {
+      for (const line of String(chunk).trim().split('\n')) if (line) { const message = JSON.parse(line); responses.set(message.id, message) }
+    })
+    writeRpc(child, 1, 'initialize', {})
+    writeRpc(child, 2, 'tools/call', { name: 'ekko_studio_api_openapi_get', arguments: { path: '/api/hermes/cron/current-session', method: 'POST' } })
+    const catalog = JSON.parse((await waitForRpc(responses, 2)).result.content[0].text)
+    server.close()
+    const fields = Object.fromEntries(catalog.operations[0].requestBody.fields.map((field: any) => [field.name, field.required]))
+    expect(fields).toMatchObject({ profile: true, kind: true, name: false, schedule: false, prompt: false, script: false, mode: false, job_id: false })
+    expect(fields).not.toHaveProperty('session_id')
+  })
 })

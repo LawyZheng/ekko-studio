@@ -16,7 +16,7 @@ import { logger } from '../../studio/public/logging'
 import { ConsentError } from '../services/cron-consent/consent'
 import { admitCurrentSessionCron, refuseCronOverrides } from '../services/cron-consent/current-session'
 import { stopScriptReportCapture } from '../services/script-reports/enrollment'
-import { body, loginUser, requestProfile, sendError } from './cron-consent'
+import { loginUser, requestProfile, sendError } from './cron-consent'
 
 /** A dispatch keeps its admission authority until it finishes, at most this long. */
 const DISPATCH_DEADLINE_MS = 120_000
@@ -29,8 +29,9 @@ const policyView = (profile: string, policy: TrustedCronPolicy) =>
 export async function getPolicy(ctx: Context) {
   const user = await loginUser(ctx)
   if (!user) return
-  const profile = typeof ctx.query.profile === 'string' ? ctx.query.profile : ''
-  if (!profile || !consentAccountAllowed(user.id, profile)) { ctx.status = 403; ctx.body = { error: 'profile_access_denied' }; return }
+  const profile = String(ctx.query.profile ?? '')
+  if (!profile) { ctx.status = 400; ctx.body = { error: 'invalid_profile', message: 'profile is required' }; return }
+  if (!consentAccountAllowed(user.id, profile)) { ctx.status = 403; ctx.body = { error: 'profile_access_denied' }; return }
   ctx.body = policyView(profile, trustedCronPolicy(user.id, profile))
 }
 
@@ -38,7 +39,9 @@ export async function getPolicy(ctx: Context) {
 export async function putPolicy(ctx: Context) {
   const user = await loginUser(ctx)
   if (!user) return
-  const input = body(ctx)
+  const raw = ctx.request.body as { profile: string; enabled: boolean; expected_revision: number } | undefined
+  const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+
   const profile = requestProfile(ctx, input.profile)
   if (!profile) return
   if (!consentAccountAllowed(user.id, profile)) { ctx.status = 403; ctx.body = { error: 'profile_access_denied' }; return }
@@ -58,9 +61,11 @@ export async function putPolicy(ctx: Context) {
 
 /** POST /api/hermes/cron/current-session — the trusted admission credential only. */
 export async function admit(ctx: Context) {
-  const authority = ctx.state.cronAdmission as ({ accountId: number; profile: string; sessionId: string; generation: string; epoch: string; token: string }) | undefined
+  const authority = ctx.state.cronAdmission as ({ accountId: number; profile: string; sessionId: string; generation: string; epoch: string; token: string; isActive: () => boolean }) | undefined
   if (!authority) { ctx.status = 403; ctx.body = { error: 'trusted_capability_required' }; return }
-  const input = body(ctx)
+  const raw = ctx.request.body as { profile: string; kind: string; mode?: string; job_id?: string; name?: string; schedule?: string; script?: string; workdir?: string
+    interpreter?: string; paused?: boolean; prompt?: string } | undefined
+  const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
   if (!requestProfile(ctx, input.profile)) return
   try {
     ctx.body = await admitCurrentSessionCron({ ...authority, claim: () => claimTrustedCronCapability(authority.token) }, input)
@@ -78,7 +83,9 @@ export async function admit(ctx: Context) {
 export async function dispatch(ctx: Context) {
   const user = await loginUser(ctx)
   if (!user) return
-  const input = body(ctx)
+  const raw = ctx.request.body as { profile: string; session_id: string; kind: string; mode?: string; job_id?: string; name?: string; schedule?: string; script?: string; workdir?: string
+    interpreter?: string; paused?: boolean; prompt?: string } | undefined
+  const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
   const profile = requestProfile(ctx, input.profile)
   if (!profile) return
   try {

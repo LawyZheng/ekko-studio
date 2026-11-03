@@ -1323,6 +1323,10 @@ class AgentPool:
             raise ValueError("invalid cron dispatch")
         record = RunRecord(run_id=uuid.uuid4().hex, session_id=f"cron-dispatch:{uuid.uuid4().hex}")
         with self._lock:
+            # Dispatch records belong to no agent session: unread terminal ones are swept here.
+            for run_id, run in list(self._runs.items()):
+                if run.session_id.startswith("cron-dispatch:") and run.status != "running" and time.time() - (run.ended_at or 0) > 600:
+                    del self._runs[run_id]
             self._runs[record.run_id] = record
 
         def run() -> None:
@@ -3026,7 +3030,7 @@ class AgentPool:
         if record is None:
             raise KeyError(f"unknown run: {run_id}")
         self._check_run_worker(record)
-        return {
+        snapshot = {
             "run_id": record.run_id,
             "session_id": record.session_id,
             "status": record.status,
@@ -3038,6 +3042,11 @@ class AgentPool:
             "result": record.result,
             "error": record.error,
         }
+        if record.session_id.startswith("cron-dispatch:") and snapshot["status"] != "running":
+            # A dispatch has exactly one reader: its terminal result retires the record.
+            with self._lock:
+                self._runs.pop(run_id, None)
+        return snapshot
 
     def get_output(self, run_id: str, cursor: int = 0, event_cursor: int = 0) -> dict[str, Any]:
         with self._lock:

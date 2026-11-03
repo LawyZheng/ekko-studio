@@ -26,6 +26,8 @@ export interface CronAdmissionAuthority {
   epoch: string
   /** Consumes a single-use scope; a chat turn's scope may admit several jobs. */
   claim: () => boolean
+  /** The issuing turn or dispatch is still live (not ended, expired or revoked); separate from the claim. */
+  isActive: () => boolean
 }
 
 /** Fields that would choose a destination or authority. */
@@ -39,6 +41,7 @@ export function refuseCronOverrides(input: Record<string, unknown>): void {
 /** Why the captured authority no longer admits, or null. Checked again after every native await. */
 function refusal(authority: CronAdmissionAuthority): { status: number; code: string } | null {
   const { accountId, profile, sessionId, generation, epoch } = authority
+  if (!authority.isActive()) return { status: 409, code: 'execution_ended' }
   if (!trustedCronPolicyCurrent(accountId, profile, epoch)) return { status: 403, code: 'trusted_policy_changed' }
   const session = trustedCronSessionRefusal(accountId, profile, sessionId)
   if (session) return session

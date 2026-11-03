@@ -21,7 +21,7 @@ let m: any
 let turns: any
 const published: string[] = []
 const guard = { verdict: { ok: true } as any, calls: [] as string[] }
-const cli: { calls: string[][]; jobs: any[]; createGate?: Promise<void>; editGate?: Promise<void>; resumeGate?: Promise<void>; onCreate?: (id: string) => void; onResume?: (job: any) => void } = { calls: [], jobs: [] }
+const cli: { calls: string[][]; jobs: any[]; createGate?: Promise<void>; editGate?: Promise<void>; resumeGate?: Promise<void>; onCreate?: (id: string) => void; onResume?: (job: any) => void; resumeIgnored?: boolean } = { calls: [], jobs: [] }
 const users: Record<string, { id: number; token: string; modelRun: string; legacy: string }> = {}
 
 function saveJobs() { mkdirSync(join(hermesHome, 'cron'), { recursive: true }); writeFileSync(join(hermesHome, 'cron', 'jobs.json'), JSON.stringify({ jobs: cli.jobs })) }
@@ -39,7 +39,7 @@ beforeEach(async () => {
   vi.stubEnv('HERMES_WEB_UI_HOME', studioHome)
   vi.stubEnv('HERMES_HOME', hermesHome)
   vi.stubEnv('HERMES_WEB_UI_TEST_DB_DIR', join(root, 'db'))
-  cli.calls = []; cli.createGate = undefined; cli.editGate = undefined; cli.resumeGate = undefined; cli.onCreate = undefined; cli.onResume = undefined
+  cli.calls = []; cli.resumeIgnored = false; cli.createGate = undefined; cli.editGate = undefined; cli.resumeGate = undefined; cli.onCreate = undefined; cli.onResume = undefined
   cli.jobs = [
     { id: 'agent1', name: 'Morning brief', prompt: 'Summarize the news', no_agent: false, deliver: 'local', enabled: true,
       schedule: { kind: 'cron', expr: '0 9 * * *', display: '0 9 * * *' }, schedule_display: '0 9 * * *', repeat: { times: null, completed: 4 },
@@ -73,7 +73,7 @@ beforeEach(async () => {
         if (rest.includes('--script')) target.script = flag('--script')
         if (rest.includes('--schedule')) target.schedule_display = flag('--schedule')
       }
-      if (command === 'resume') { await cli.resumeGate; target.enabled = true; cli.onResume?.(structuredClone(target)) }
+      if (command === 'resume') { await cli.resumeGate; if (!cli.resumeIgnored) target.enabled = true; cli.onResume?.(structuredClone(target)) }
       if (command === 'pause') target.enabled = false
       saveJobs()
       return { stdout: '', stderr: '' }
@@ -767,6 +767,59 @@ describe('trusted current-session automation', () => {
     expect(existsSync(m.paths.scriptReportRevokedMarker(consentRow.binding_id))).toBe(false)
     expect(commands().slice(before)).toEqual([])
     expect(job('job4').enabled).toBe(true)
+  })
+
+  it('an admission whose execution ends during a native create, or before a queued create starts, never binds or resumes', async () => {
+    await setPolicy(true)
+    const first = { live: true }
+    let release!: () => void
+    cli.createGate = new Promise(resolve => { release = resolve })
+    const ending = admit(capability('chat-1', users.member.id, first), newAgent)
+    await until(() => commands().includes('create'), 'native create entered')
+    // A second admission, live while it waits for the profile's creation in flight.
+    let checks = 0
+    const second = { live: true }
+    const queuedToken = m.trusted.issueTrustedCronCapability({ accountId: users.member.id, profile: 'default', sessionId: 'chat-2',
+      isActive: () => { checks += 1; return second.live } })
+    const queued = admit(queuedToken, { ...newAgent, name: 'Queued brief' })
+    // Request authentication and the admission's first check have passed: it is queued on the creation fence.
+    await until(() => checks >= 2, 'queued behind the creation in flight')
+    first.live = false
+    second.live = false
+    release()
+    expect((await ending).body).toMatchObject({ error: 'execution_ended', job_id: 'job4' })
+    expect((await queued).body).toMatchObject({ error: 'execution_ended' })
+    expect(commands()).toEqual(['create'])
+    expect(job('job4').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('verifies the job after resume: a lost acknowledgment is paused again and checked; a resume without effect is reported, never claimed', async () => {
+    await setPolicy(true)
+    // The job was enabled and saved, then the acknowledgment was lost.
+    cli.onResume = () => { saveJobs(); throw new Error('connection reset') }
+    expect((await admit(capability(), newAgent)).body).toMatchObject({ error: 'native_resume_uncertain', job_id: 'job4' })
+    expect(commands()).toEqual(['create', 'resume', 'pause'])
+    expect(job('job4').enabled).toBe(false)
+    cli.onResume = undefined
+    cli.resumeIgnored = true
+    expect((await admit(capability(), { ...newAgent, name: 'Ignored brief' })).body).toMatchObject({ error: 'native_resume_failed', job_id: 'job5' })
+    expect(job('job5').enabled).toBe(false)
+    expect(cronBindings()).toEqual([])
+  })
+
+  it('only a chat socket authenticated with a login credential may carry trusted authority; runtime and legacy JWTs keep ordinary chat', async () => {
+    const { ChatRunSocket } = await import(`${STUDIO}/sockets/chat-run`)
+    const connect = async (token: string) => {
+      const socket = { handshake: { auth: { token }, query: { profile: 'default' } }, data: {} as Record<string, any> }
+      let error: unknown
+      await ChatRunSocket.prototype['authMiddleware'].call({ canAccessProfile: () => true }, socket, (err?: Error) => { error = err })
+      return { error, user: socket.data.user?.id, login: socket.data.loginCredential === true }
+    }
+    expect(await connect(users.member.token)).toEqual({ error: undefined, user: users.member.id, login: true })
+    for (const token of [users.member.modelRun, users.member.legacy]) {
+      expect(await connect(token)).toEqual({ error: undefined, user: users.member.id, login: false })
+    }
   })
 
   it('dispatch: a login user starts a single-use, model-free admission for a session it can use', async () => {

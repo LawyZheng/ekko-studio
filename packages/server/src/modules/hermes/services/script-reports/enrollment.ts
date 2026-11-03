@@ -352,6 +352,8 @@ async function executeNewLocked(bindingId: string, plan: NewEnrollmentPlan, dest
   let created: Record<string, any> | null = null
   const create = async (): Promise<string> => {
     try {
+      // Possibly queued behind another creation: the destination must still authorize before it starts.
+      recheckDestination(destination, profile)
       // Hermes validates the script it is given at creation only: give it the real target first.
       const args = ['create', '--name', plan.name, '--deliver', 'local', '--no-agent', '--script', target.relative,
         '--paused', '--paused-reason', 'Ekko script report enrollment']

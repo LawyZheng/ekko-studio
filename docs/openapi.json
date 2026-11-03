@@ -7231,8 +7231,45 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
-                "additionalProperties": true
+                "properties": {
+                  "interpreter": {
+                    "type": "string"
+                  },
+                  "job_id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "mode": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  },
+                  "profile": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "schedule": {
+                    "type": "string"
+                  },
+                  "script": {
+                    "type": "string"
+                  },
+                  "workdir": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "profile"
+                ]
               }
             }
           }
@@ -7269,8 +7306,49 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
-                "additionalProperties": true
+                "properties": {
+                  "interpreter": {
+                    "type": "string"
+                  },
+                  "job_id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "mode": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  },
+                  "profile": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "schedule": {
+                    "type": "string"
+                  },
+                  "script": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "workdir": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "profile",
+                  "session_id"
+                ]
               }
             }
           }
@@ -7356,12 +7434,9 @@
           {
             "name": "profile",
             "in": "query",
-            "required": false,
+            "required": true,
             "schema": {
-              "type": "string",
-              "enum": [
-                "string"
-              ]
+              "type": "string"
             }
           }
         ]
@@ -7395,8 +7470,22 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
-                "additionalProperties": true
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "expected_revision": {
+                    "type": "number"
+                  },
+                  "profile": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "expected_revision",
+                  "profile"
+                ]
               }
             }
           }

@@ -16,6 +16,7 @@ import type { SessionState } from '../../packages/server/src/modules/studio/serv
 const mocks = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
   getSession: vi.fn(),
+  createSession: vi.fn(),
   updateSession: vi.fn(),
   compress: vi.fn(async (history: unknown[]) => ({
     messages: history,
@@ -34,7 +35,7 @@ vi.mock('../../packages/server/src/modules/studio/repositories/session-store', (
   getSessionContextMessage: vi.fn(),
   getFirstSessionMessageByRole: vi.fn(),
   getSessionMessageCountByRole: vi.fn(() => 0),
-  createSession: vi.fn(),
+  createSession: mocks.createSession,
   addMessage: vi.fn((row: Record<string, unknown>) => {
     const id = mocks.rows.length + 1
     mocks.rows.push({ ...row, id })
@@ -201,5 +202,30 @@ describe('handle-bridge-run with a Windows drive-root workspace', () => {
 
     const updates = emitter.emit.mock.calls.filter(([event]) => event === 'session.workspace.updated')
     expect(updates).toEqual([['session.workspace.updated', expect.objectContaining({ workspace: 'D:\\' })]])
+  })
+})
+
+describe('trusted Cron authority of a chat turn', () => {
+  afterEach(() => vi.clearAllMocks())
+
+  it('is issued for a fresh chat only after the session is persisted, right before Bridge dispatch, never for an autonomous turn', async () => {
+    let persisted = false
+    const row = { id: 'fresh-1', profile: 'default', model: '', provider: '', history_revision: 0, workspace: '' }
+    mocks.getSession.mockImplementation(() => (persisted ? row : undefined))
+    mocks.createSession.mockImplementation(() => { persisted = true })
+    const issue = vi.fn(() => (persisted ? 'studio_run_turn' : undefined))
+    const run = async (extra: Record<string, unknown>) => {
+      const bridge = makeBridge()
+      const { nsp, socket } = makeSockets()
+      await handleBridgeRun(nsp, socket, { session_id: 'fresh-1', input: 'remind me daily', studio_cron_issue: issue, ...extra }, 'default',
+        new Map([['fresh-1', { messages: [], isWorking: false, events: [], queue: [] } as SessionState]]),
+        bridge as unknown as PrimaryAgentBridgeClient, false, vi.fn(), vi.fn())
+      return bridge.chat.mock.calls[0]?.[5] as Record<string, unknown> | undefined
+    }
+    expect((await run({}))?.studio_cron_capability).toBe('studio_run_turn')
+    expect(issue).toHaveBeenCalledTimes(1)
+    expect(issue.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.createSession.mock.invocationCallOrder[0])
+    expect((await run({ autonomous: true }))?.studio_cron_capability).toBeUndefined()
+    expect(issue).toHaveBeenCalledTimes(1)
   })
 })

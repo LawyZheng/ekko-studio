@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import threading
 from contextvars import ContextVar
 from typing import Any
 
@@ -54,16 +55,19 @@ CURRENT_SESSION_PATH = "/api/hermes/cron/current-session"
 
 
 def _managed_api_server(server_name: str, server: Any) -> bool:
-    """Studio's own managed API server, verified by name, marker, toolset and launcher."""
+    """Studio's own managed API server: a stdio launch exactly equal to the one its owning Studio uses."""
     config = getattr(server, "_config", None)
-    if server_name != MANAGED_API_SERVER or not isinstance(config, dict):
+    try:
+        launch = json.loads(os.environ.get("HERMES_AGENT_BRIDGE_STUDIO_MCP_LAUNCH", ""))
+    except ValueError:
+        return False
+    if server_name != MANAGED_API_SERVER or not isinstance(config, dict) or not isinstance(launch, dict):
         return False
     env = config.get("env") if isinstance(config.get("env"), dict) else {}
-    args = [str(arg) for arg in config.get("args") or []]
-    launcher = os.path.basename(str(config.get("command") or ""))
-    return (env.get("HERMES_WEB_UI_MANAGED_MCP") == "1" and env.get("HERMES_MCP_TOOLSET") == "api"
-            and bool(args) and args[-1] == "api"
-            and (launcher == "ekko-studio-mcp" or any(arg.replace("\\", "/").endswith("bin/ekko-studio-mcp.mjs") for arg in args)))
+    return (not config.get("url") and config.get("transport") in (None, "stdio")
+            and env.get("HERMES_WEB_UI_MANAGED_MCP") == "1" and env.get("HERMES_MCP_TOOLSET") == "api"
+            and config.get("command") == launch.get("command")
+            and [str(arg) for arg in config.get("args") or []] == launch.get("args"))
 
 
 class _MetaSession:
@@ -116,8 +120,12 @@ def install_cron_capability_meta() -> None:
     module._call_tool_racing_stdio_death = call
 
 
-def run_cron_admission(capability: str, body: dict[str, Any]) -> str:
-    """The fixed model-free admission: Studio's managed API tool, the current-session path, this body."""
+def run_cron_admission(capability: str, body: dict[str, Any], deadline_seconds: float = 100.0) -> str:
+    """The fixed model-free admission: Studio's managed API tool, the current-session path, this body.
+
+    Bounded: at the deadline the calling thread is interrupted, which Hermes' MCP wait loop honors by
+    cancelling the in-flight call; the Studio side refuses the expired authority after any await.
+    """
     try:
         discovery = importlib.import_module("tools.mcp_tool_discovery")
     except ModuleNotFoundError:
@@ -126,9 +134,24 @@ def run_cron_admission(capability: str, body: dict[str, Any]) -> str:
     schema = importlib.import_module("tools.mcp_tool_schema")
     tool = schema.mcp_prefixed_tool_name(MANAGED_API_SERVER, API_REQUEST_TOOL)
     handle_function_call = importlib.import_module("model_tools").handle_function_call
+    interrupt = importlib.import_module("tools.interrupt")
+    thread_id = threading.get_ident()
+    expired = threading.Event()
+
+    def expire() -> None:
+        expired.set()
+        interrupt.set_interrupt(True, thread_id)
+
+    timer = threading.Timer(deadline_seconds, expire)
     token = CRON_CAPABILITY.set(capability)
+    timer.start()
     try:
         result = handle_function_call(tool, {"method": "POST", "path": CURRENT_SESSION_PATH, "body": body})
     finally:
+        timer.cancel()
         CRON_CAPABILITY.reset(token)
+        if expired.is_set():
+            interrupt.set_interrupt(False, thread_id)
+    if expired.is_set():
+        raise TimeoutError("dispatch_deadline")
     return result if isinstance(result, str) else json.dumps(result)

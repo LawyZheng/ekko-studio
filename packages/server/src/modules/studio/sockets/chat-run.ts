@@ -114,7 +114,7 @@ import type {
   QueuedRun,
   SessionState,
 } from '../services/chat-run/types'
-import { authenticateUserToken, inspectAppUserToken, isAuthEnabled, type AuthenticatedUser } from '../public/auth'
+import { authenticateLoginUserToken, authenticateUserToken, inspectAppUserToken, isAuthEnabled, type AuthenticatedUser } from '../public/auth'
 import { findUserById, userCanAccessProfile } from '../repositories/users-store'
 import { observeRunChatPetEvent } from '../public/pet-events'
 import { observePersonPresenceEvent } from '../services/person/presence'
@@ -932,6 +932,8 @@ export class ChatRunSocket {
       return next(new Error('Profile access denied'))
     }
     socket.data.user = user
+    // Only an interactive login may carry trusted Cron authority; runtime and legacy JWTs chat as before.
+    socket.data.loginCredential = !!await authenticateLoginUserToken(token || '')
     next()
   }
 
@@ -2063,12 +2065,14 @@ export class ChatRunSocket {
         ? this.beginTaskPlanRun(data.session_id, profile, !data.background_delegation_id, (socket.data?.sessionShare ? undefined : (socket.data?.user as AuthenticatedUser | undefined)?.id))
         : undefined
       if (planContext) data.instructions = [data.instructions, taskPlanRunInstruction()].filter(Boolean).join('\n\n')
-      // Trusted current-session Cron: an admission authority for this live turn, only when the
-      // requesting account enabled the policy. It travels as per-call MCP metadata, never in prompts.
+      // Trusted current-session Cron: an admission authority for this live, user-initiated turn of a
+      // login socket whose account enabled the policy. Issued by the run once the session is persisted;
+      // it travels as per-call MCP metadata, never in prompts.
       const cronAccount = socket.data?.sessionShare ? undefined : (socket.data?.user as AuthenticatedUser | undefined)?.id
-      const cronCapability = planContext && data.session_id && cronAccount !== undefined && !data.background_delegation_id
+      const cronIssue = planContext && data.session_id && cronAccount !== undefined && socket.data?.loginCredential === true
+        && !data.background_delegation_id && !data.autonomous
         && ![source, data.session_source].some(value => value === 'group_chat' || value === 'workflow' || value === 'global_agent')
-        ? issueTrustedCronCapability({ accountId: cronAccount, profile, sessionId: data.session_id, contextId: planContext,
+        ? () => issueTrustedCronCapability({ accountId: cronAccount, profile, sessionId: data.session_id!, contextId: planContext,
           isActive: () => this.taskPlanRuns.isActive(planContext, profile) }) ?? undefined
         : undefined
       let fullInstructions = data.instructions
@@ -2095,7 +2099,7 @@ export class ChatRunSocket {
       }
       try {
         await handleBridgeRun(
-          this.nsp, socket, { ...data, task_plan_context_id: planContext, studio_cron_capability: cronCapability, instructions: fullInstructions, onEvent }, profile,
+          this.nsp, socket, { ...data, task_plan_context_id: planContext, studio_cron_issue: cronIssue, instructions: fullInstructions, onEvent }, profile,
           this.sessionMap, this.bridge,
           skipUserMessage,
           loadSessionStateFromDb,
