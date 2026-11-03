@@ -18,7 +18,7 @@ const PASSIVE_NOTICE_KINDS = "kind IN ('cron','external','script_report')"
 export type SessionNotificationDisposition =
   | 'notified' | 'status_only' | 'silent' | 'no_content' | 'unknown' | 'owner_missing' | 'target_changed'
   | 'admitting' | 'admitted' | 'dispatched' | 'consumed' | 'cancelled' | 'owner_reset' | 'owner_stopped'
-  | 'bridge_unavailable'
+  | 'bridge_unavailable' | 'policy_revoked'
 
 /** Durable attention key of an accepted notice of any kind in `session_attention_events`. */
 export const NOTICE_ATTENTION_PREFIX = 'cron-notice:'
@@ -293,6 +293,8 @@ export interface CronSessionBinding {
   session_generation: string | null
   /** Approving account of a consent binding; null for direct login bindings. */
   account_id: number | null
+  /** Trusted-automation policy epoch that created this binding; null for consent and direct bindings. */
+  trusted_epoch: string | null
 }
 
 /** Bindings written by the Agent Bridge cronjob middleware for this Studio instance. */
@@ -309,6 +311,7 @@ export function readCronSessionBindings(path: string, instanceId: string): CronS
       requested_paused: Number(row.requested_paused || 0),
       session_generation: row.session_generation ? String(row.session_generation) : null,
       account_id: row.account_id === null || row.account_id === undefined ? null : Number(row.account_id),
+      trusted_epoch: row.trusted_epoch ? String(row.trusted_epoch) : null,
     }))
   } catch (err: any) {
     if (/no such table/i.test(String(err?.message || ''))) return []

@@ -46,6 +46,8 @@ export interface AgentBridgeChatOptions {
   force_compress?: boolean
   /** Studio owner session generation for this turn; cron bindings made by it carry this value. */
   studio_session_generation?: string
+  /** Trusted current-session Cron admission authority of this turn; Studio's managed API MCP receives it per call. */
+  studio_cron_capability?: string
   /** Agent-session creation policy. False keeps delegate_task available but
    * makes background=true fall back to synchronous execution. */
   background_delegation_enabled?: boolean
@@ -569,6 +571,7 @@ export class AgentBridgeClient {
         : {}),
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(options.studio_session_generation ? { studio_session_generation: options.studio_session_generation } : {}),
+      ...(options.studio_cron_capability ? { studio_cron_capability: options.studio_cron_capability } : {}),
     })
   }
 
@@ -817,6 +820,11 @@ export class AgentBridgeClient {
       producer_key: notification.producer_key,
       claim_id: notification.claim_id,
     })
+  }
+
+  /** Start the fixed, model-free current-session Cron admission; poll `getResult` with the returned run id. */
+  studioCronDispatch(profile: string, sessionId: string, capability: string, body: Record<string, unknown>): Promise<AgentBridgeResponse & { run_id: string; status: string }> {
+    return this.request<AgentBridgeResponse & { run_id: string; status: string }>({ action: 'studio_cron_dispatch', profile, session_id: sessionId, capability, body })
   }
 
   studioCronObserve(

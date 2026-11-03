@@ -170,6 +170,11 @@ function managedCommandConfig(
   return { command: 'ekko-studio-mcp', args: [toolset] }
 }
 
+/** The exact launch Studio uses for its managed MCP server of `toolset`; the Bridge's identity reference. */
+export function managedMcpLaunch(toolset: string): Record<string, unknown> {
+  return managedCommandConfig(toolset, bundledMcpScriptPath())
+}
+
 function managedConfig(
   profile: string,
   serverName: string,
