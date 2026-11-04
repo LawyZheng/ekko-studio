@@ -26,6 +26,8 @@ import MessageItem from '@/components/hermes/chat/MessageItem.vue'
 import type { Message } from '@/stores/hermes/chat'
 
 const REPORT = [
+  '### Summary',
+  '',
   '**Review Cron: actions completed**',
   '',
   '- reviewed: 2',
@@ -41,6 +43,22 @@ const REPORT = [
   'raw log line',
   '```',
 ].join('\n')
+
+const MERMAID_IMAGE = ['```mermaid', 'flowchart LR', '  P@{ img: "https://external.example/pixel.png", label: "pixel", h: 32 }', '```'].join('\n')
+const DATA_LINKS = '[png](data:image/png;base64,AAAA) [gif](data:image/gif;base64,AAAA) [jpeg](DATA:image/jpeg;base64,AAAA) [webp](data:image/webp;base64,AAAA) [web](https://example.invalid/ok)'
+
+function agentCron(content: string): Message {
+  return {
+    id: 'studio-notice-9',
+    role: 'system',
+    content,
+    timestamp: Date.now(),
+    studioNotice: {
+      kind: 'cron', notification_id: 9, disposition: 'notified', job_id: 'job-9', job_name: 'Agent digest',
+      execution_id: 'exec-9', status: 'completed', success: true, reason: null, error: null, truncated: false, finished_at: null,
+    },
+  }
+}
 
 function scriptReport(content: string): Message {
   return {
@@ -88,6 +106,7 @@ describe('MessageItem studio notices', () => {
       'https://example.invalid/pr/101',
       'https://example.invalid/pr/102',
     ])
+    expect(body.find('h3').text()).toBe('Summary')
     expect(body.find('strong').text()).toBe('Review Cron: actions completed')
     expect(body.find('li').text()).toBe('reviewed: 2')
     expect(body.find('pre code').text()).toContain('raw log line')
@@ -113,6 +132,37 @@ describe('MessageItem studio notices', () => {
       expect(link.attributes('href') || '').not.toMatch(/^(javascript|data|vbscript):/i)
     }
     expect(body.text()).toContain('<img src="x" onerror="alert(1)">')
+  })
+
+  it('shows a Mermaid fence in a script report as escaped code without rendering it', () => {
+    const wrapper = mount(MessageItem, { props: { message: scriptReport(MERMAID_IMAGE) } })
+    const body = wrapper.find('.markdown-body')
+
+    expect(body.find('[data-mermaid-source], .mermaid-diagram').exists()).toBe(false)
+    expect(body.find('pre code').text()).toContain('P@{ img: "https://external.example/pixel.png"')
+    expect(body.findAll('img, svg')).toHaveLength(0)
+  })
+
+  it('keeps Mermaid rendering for agent-backed Cron results', () => {
+    const wrapper = mount(MessageItem, { props: { message: agentCron(MERMAID_IMAGE) } })
+
+    expect(wrapper.find('.markdown-body [data-mermaid-source]').exists()).toBe(true)
+  })
+
+  it('rejects every data: link in a script report and keeps web links', () => {
+    const wrapper = mount(MessageItem, { props: { message: scriptReport(DATA_LINKS) } })
+    const hrefs = wrapper.findAll('.markdown-body a').map(link => link.attributes('href') || '')
+
+    expect(hrefs).toEqual(['https://example.invalid/ok'])
+    expect(wrapper.find('.markdown-body').text()).toContain('[png](data:image/png;base64,AAAA)')
+  })
+
+  it('keeps the existing raster data link behavior for agent-backed Cron results', () => {
+    const wrapper = mount(MessageItem, { props: { message: agentCron(DATA_LINKS) } })
+    const hrefs = wrapper.findAll('.markdown-body a').map(link => link.attributes('href') || '')
+
+    expect(hrefs).toContain('data:image/png;base64,AAAA')
+    expect(hrefs).toContain('https://example.invalid/ok')
   })
 
   it('keeps plain multiline script output on separate lines', () => {

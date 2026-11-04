@@ -71,7 +71,7 @@ const externalLink = computed(() => {
 });
 
 const plainNotice = computed(() => !!externalNotice.value);
-// Script output uses the chat Markdown renderer (raw HTML stays escaped) without loading images.
+// Script output uses the chat Markdown renderer in passive mode (see MarkdownRenderer `passive`).
 const scriptReportNotice = computed(() => props.message.studioNotice?.kind === "script_report");
 
 const studioNoticeTitle = computed(() => {
@@ -1306,7 +1306,7 @@ onBeforeUnmount(() => {
             <MarkdownRenderer
               v-if="message.role === 'system' && message.content && !isCommandMessage && !plainNotice"
               :content="message.content"
-              :defer-images="scriptReportNotice"
+              :passive="scriptReportNotice"
             />
             <div v-if="isStatusCommand" class="command-result command-status">
               <span class="command-result-icon">/</span>
