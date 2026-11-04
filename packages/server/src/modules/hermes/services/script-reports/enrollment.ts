@@ -264,6 +264,8 @@ export interface EnrollmentDestination {
   recheck?: () => void
   /** Trusted-automation epoch of a policy-created binding. */
   trustedEpoch?: string
+  /** Frozen owner of a cross-session target, enforced again at import. */
+  targetOwner?: number
 }
 
 export function prepareNewEnrollment(request: Omit<EnrollmentRequest, 'userId' | 'sessionId' | 'expectedGeneration'>): NewEnrollmentPlan {
@@ -341,6 +343,7 @@ async function executeNewLocked(bindingId: string, plan: NewEnrollmentPlan, dest
   const binding = beginScriptReportBinding({
     bindingId, userId: destination.userId, profile, sessionId: destination.sessionId, expectedGeneration: destination.expectedGeneration,
     jobName: plan.name, targetScript: target.relative, wrapperScript: wrapperRelative, trustedEpoch: destination.trustedEpoch,
+    targetOwner: destination.targetOwner,
   })
   const discard = () => {
     rmSync(wrapperPath, { force: true })
@@ -427,17 +430,14 @@ async function executeNewLocked(bindingId: string, plan: NewEnrollmentPlan, dest
 
 /**
  * Resume and verify. The destination, target and approved configuration are checked again once the
- * native resume returns: if anything was invalidated meanwhile the binding fails (reports stop and
- * the wrapper becomes a passthrough) and the job is paused again, verified, with its id reported.
+ * native resume returns: if anything was invalidated meanwhile, or the resume's outcome is uncertain
+ * (no acknowledgment, unreadable job), the binding fails (reports stop and the wrapper becomes a
+ * passthrough) and the job is paused again, verified, with its id reported.
  */
 async function resumeVerified(bindingId: string, profile: string, jobId: string, wrapperRelative: string,
   expected: string, current: () => void, runner: HermesCronRunner): Promise<EnrollmentResult> {
-  try {
-    await runner(profile, ['resume', jobId])
-  } catch (error: any) {
-    noteScriptReportBindingError(bindingId, 'native_resume_failed')
-    throw new EnrollmentError(502, 'native_resume_failed', error?.message, jobId)
-  }
+  let acknowledged = true
+  await runner(profile, ['resume', jobId]).catch(() => { acknowledged = false })
   let invalid: EnrollmentError | null = null
   try {
     current()
@@ -445,20 +445,27 @@ async function resumeVerified(bindingId: string, profile: string, jobId: string,
     if (!(error instanceof EnrollmentError)) throw error
     invalid = error
   }
-  const resumed = readNativeJob(profile, jobId)
+  let resumed: Record<string, any> | null = null
+  try { resumed = readNativeJob(profile, jobId) } catch { /* unreadable: an unknown state, reconciled below */ }
   if (!invalid && resumed && resumed.enabled === true && resumed.script === wrapperRelative && jobFingerprint(resumed) !== expected) {
     invalid = new EnrollmentError(409, 'job_changed')
   }
+  // As for an agent job: a resume read back without effect failed; one without acknowledgment or readback is uncertain.
+  const stillPaused = resumed?.enabled === false
+  if (!invalid && stillPaused) invalid = new EnrollmentError(502, 'native_resume_failed')
+  if (!invalid && (!acknowledged || !resumed)) invalid = new EnrollmentError(502, 'native_resume_uncertain')
   if (invalid) {
     failActivatedScriptReportBinding(bindingId, invalid.code)
     const marker = scriptReportRevokedMarker(bindingId)
     privateDir(scriptReportBindingDir(bindingId))
     if (!existsSync(marker)) writeExclusive(marker, `${new Date().toISOString()}\n`, 0o600)
-    let paused = false
-    try {
-      await runner(profile, ['pause', jobId])
-      paused = readNativeJob(profile, jobId)?.enabled === false
-    } catch { /* reported below */ }
+    let paused = stillPaused
+    if (!paused) {
+      try {
+        await runner(profile, ['pause', jobId])
+        paused = readNativeJob(profile, jobId)?.enabled === false
+      } catch { /* reported below */ }
+    }
     if (!paused) noteScriptReportBindingError(bindingId, `${invalid.code};native_pause_failed`)
     throw new EnrollmentError(invalid.status, invalid.code, paused ? undefined : 'native pause unverified', jobId)
   }
@@ -517,6 +524,11 @@ export function prepareAdoption(profileInput: string, jobIdInput: string): Adopt
 
 /** Claimed or running executions of the job in its native ledger; unreadable counts as busy. */
 export type JobBusyProbe = (hermesHome: string, jobId: string) => boolean
+
+/** Whether the profile's native ledger shows the job claimed or running (unreadable counts as busy). */
+export function nativeJobBusy(profile: string, jobId: string, busy: JobBusyProbe = defaultJobBusyProbe): boolean {
+  return busy(profileHome(profile), jobId)
+}
 
 export const defaultJobBusyProbe: JobBusyProbe = (hermesHome, jobId) => {
   const path = join(hermesHome, 'cron', 'executions.db')
@@ -594,6 +606,7 @@ export async function executeAdoption(plan: AdoptionPlan, destination: Enrollmen
     beginScriptReportBinding({
       bindingId, userId: destination.userId, profile, sessionId: destination.sessionId, expectedGeneration: destination.expectedGeneration,
       jobName: plan.name, targetScript: target.relative, wrapperScript: wrapperRelative, trustedEpoch: destination.trustedEpoch,
+      targetOwner: destination.targetOwner,
     })
     recordScriptReportJob(bindingId, jobId)
     const fail = (code: string, status = 502, message?: string): never => {
@@ -610,6 +623,13 @@ export async function executeAdoption(plan: AdoptionPlan, destination: Enrollmen
     const paused = readNativeJob(profile, jobId)
     if (!paused || paused.enabled !== false || jobFingerprint(paused) !== plan.jobFingerprint) fail('job_changed', 409)
     if (busy(home, jobId)) fail('job_busy', 409)
+    // The pause awaited the native CLI: the destination must still authorize before the job is rewritten.
+    try {
+      recheckDestination(destination, profile)
+    } catch (error: any) {
+      if (error instanceof EnrollmentError) fail(error.code, error.status)
+      throw error
+    }
     try {
       privateDir(join(scriptsDir, WRAPPER_DIR))
       writeExclusive(wrapperPath, renderWrapper(manifestPath), 0o700)

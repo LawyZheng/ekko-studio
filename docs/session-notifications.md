@@ -311,7 +311,7 @@ Studio chat card (login) -> approve | deny -> existing executor runs the frozen 
 ## Trusted current-session automation (opt-in)
 
 Like a messaging gateway, an account can let its chats set up recurring Cron delivery into the
-**current** session without a per-job approval. Off by default, per Studio instance, account and
+**current** session, or into another of its own sessions, without a per-job approval. Off by default, per Studio instance, account and
 profile; consent requests stay the default everywhere else.
 
 ```text
@@ -335,18 +335,25 @@ PUT /api/hermes/cron/trusted-automation  { profile, enabled, expected_revision }
   `schedule`, `prompt`: native create paused and local, bind, resume),
   `"cron_session_binding"` + `job_id` (an unbound agent job; a bound one is refused
   `job_already_bound`), or `"script_report_enrollment"` (`mode` new or existing, as above). The
-  destination is always the authority's session: `session_id`, `target_session_id`, `context_id`,
-  account, generation or `deliver` fields are refused (`destination_override_refused`). Policy epoch,
-  account access, session ownership and generation are rechecked after every native await before
-  binding or resume. Creating an agent job is not atomic: a failure after creation leaves it paused
-  and reports its `job_id`.
+  destination is the authority's session, or an optional `target_session_id`: another session of the
+  same account and profile, validated exactly like a consent target (unknown, deleted, unattributed,
+  foreign-account or other-profile targets are refused before any native call) and frozen with its
+  generation and owner. The authority stays the origin session. `session_id`, `context_id`, account,
+  generation or `deliver` fields are refused (`destination_override_refused`). The origin (live
+  execution, policy epoch, access, generation) and the target are rechecked after every native await
+  before binding or resume. An existing agent or script job is paused and must be quiescent (no
+  claimed or running execution) before it is bound, and is resumed only if it was scheduled; a job
+  with an external `failure_deliver` lane is refused. Creation is not atomic: a failure after
+  creation, or an uncertain resume, leaves the job paused (verified by reading it back) and reports
+  its `job_id`.
 - **Model-free setup.** `POST /api/hermes/cron/current-session/dispatch` (login only,
-  `{ profile, session_id, kind, ... }`) runs the same admission once, for a session the caller can
+  `{ profile, session_id, kind, ..., optional target_session_id }`) runs the same admission once, for a session the caller can
   use, through a bounded Bridge worker that calls the managed API tool natively — no agent, no model
   request. Its authority is single use and ends with the run.
-- **Delivery and revocation.** Bindings record the creating epoch. Delivery (observer, script
-  import and live publication) continues only while that epoch is the enabled one and the account
-  keeps access; restoring access resumes it, re-enabling the policy does not (new epoch). Disabling
+- **Delivery and revocation.** Bindings record the creating epoch, and a cross-session binding also
+  its target's owner. Delivery (observer, script import and live publication) continues only while
+  that epoch is the enabled one, the account keeps access and a cross-session target keeps that owner;
+  a trusted binding observes only executions claimed from its binding instant on; restoring access resumes it, re-enabling the policy does not (new epoch). Disabling
   stops capture of policy-created script bindings (their native jobs keep running and the wrapper
   passes through) and policy-created agent results are recorded as `policy_revoked`; established
   native jobs are not paused, so agent jobs keep using their model locally until the user pauses or

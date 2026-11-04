@@ -272,6 +272,22 @@ describe('plan session command', () => {
     }))
   })
 
+  it('attributes a session it creates to the authenticated socket account; never claims an existing session', async () => {
+    getSessionMock.mockReturnValueOnce(null)
+    const state = { messages: [], isWorking: false, events: [], queue: [] }
+    const { bridge, nsp, runQueuedItem, sessionMap, socket } = makeContext(state, { handled: true, type: 'title', message: 'Title set.' })
+    ;(socket as any).data = { user: { id: 7, role: 'admin', profiles: ['default'] } }
+    const { handleSessionCommand, parseSessionCommand } = await import('../../packages/server/src/modules/studio/services/chat-run/session-command')
+    const run = () => handleSessionCommand('session-1', parseSessionCommand('/title Delivery target')!, {
+      nsp: nsp as any, socket: socket as any, sessionMap, bridge: bridge as any, profile: 'default', runQueuedItem,
+    })
+    await run()
+    expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'session-1', source: 'cli', studio_user_id: 7 }))
+    createSessionMock.mockClear()
+    await run()
+    expect(createSessionMock).not.toHaveBeenCalled()
+  })
+
   it('enables session YOLO before the first agent chat creates a bridge session', async () => {
     getSessionMock.mockReturnValueOnce(null)
     const state = { messages: [], isWorking: false, events: [], queue: [] }

@@ -10,6 +10,8 @@ import {
   type SessionNotificationRecord,
 } from '../../repositories/session-notification-store'
 import { findUserById, userCanAccessProfile } from '../../repositories/users-store'
+import { getSession } from '../../repositories/session-store'
+import { studioSessionAccount } from '../../contracts/runs/usage'
 import { trustedCronPolicyCurrent } from '../../public/trusted-cron'
 
 /** Exact answers are stored whole up to this bound; longer answers are clipped and flagged. */
@@ -132,6 +134,13 @@ function bindingAccountCurrent(binding: CronSessionBinding): boolean {
   return !!user && user.status === 'active' && (user.role === 'super_admin' || userCanAccessProfile(user.id, binding.profile))
 }
 
+/** A cross-session target still belongs to the owner frozen at admission; other bindings have no such fence. */
+export function targetOwnerCurrent(targetOwner: number | null, sessionId: string): boolean {
+  if (targetOwner === null) return true
+  const session = getSession(sessionId)
+  return !!session && Number(studioSessionAccount(session as any)) === targetOwner
+}
+
 /** One observation pass over every active binding of this Studio instance. */
 export async function observeCronBindings(deps: CronObserverDeps): Promise<SessionNotificationRecord[]> {
   const bindings = readCronSessionBindings(deps.bindingsPath, deps.namespace)
@@ -146,7 +155,9 @@ export async function observeCronBindings(deps: CronObserverDeps): Promise<Sessi
   for (const [profile, profileBindings] of byProfile) {
     const response = await deps.observe(profile, profileBindings.map(binding => {
       const before = cronJobObserveCursor(deps.namespace, profile, binding.job_id)
-      return { job_id: binding.job_id, since: binding.bound_at - 1, ...(before ? { before } : {}) }
+      // A trusted binding is prospective from its binding instant: its job was paused and quiescent until then.
+      const since = binding.trusted_epoch !== null ? binding.bound_at : binding.bound_at - 1
+      return { job_id: binding.job_id, since, ...(before ? { before } : {}) }
     }))
     // A binding replaced while Hermes answered owns the job now: drop this stale answer for it.
     const live = new Map(readCronSessionBindings(deps.bindingsPath, deps.namespace)
@@ -182,6 +193,7 @@ export async function observeCronBindings(deps: CronObserverDeps): Promise<Sessi
       if (!binding || changedTargets.has(execution.job_id) || !isScheduledExecution(execution)) continue
       // A consent binding stops delivering once its approving account loses access.
       const current = bindingOwnerCurrent(binding, deps.getSession(binding.session_id)) && bindingAccountCurrent(binding)
+        && targetOwnerCurrent(binding.target_owner, binding.session_id)
       // A policy-created binding routes only while its policy epoch is the enabled one; never revived.
       const policyRevoked = binding.trusted_epoch !== null
         && (binding.account_id === null || !trustedCronPolicyCurrent(binding.account_id, binding.profile, binding.trusted_epoch))
@@ -189,7 +201,8 @@ export async function observeCronBindings(deps: CronObserverDeps): Promise<Sessi
       const classified = policyRevoked ? { disposition: 'policy_revoked' as const, payload: ref }
         : current ? classifyCronExecution(execution) : { disposition: 'owner_missing' as const, payload: ref }
       // Server-authored provenance, rechecked at publication.
-      const provenance = binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch } } : {}
+      const provenance = binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch,
+        ...(binding.target_owner !== null ? { owner: binding.target_owner } : {}) } } : {}
       const record = acceptSessionNotification({
         namespace: deps.namespace,
         profile,

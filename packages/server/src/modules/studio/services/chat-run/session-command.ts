@@ -1215,12 +1215,15 @@ function formatReloadSkillItem(item: unknown): string {
 
 function ensureCommandSession(sessionId: string, command: ParsedSessionCommand, ctx: SessionCommandContext) {
   if (getSession(sessionId)) return
+  // Created here, so attributed here, like a session a chat run creates; an existing session is never claimed.
+  const owner = (ctx.socket.data?.user as { id?: number } | undefined)?.id
   createSession({
     id: sessionId,
     profile: ctx.profile,
     source: 'cli',
     model: ctx.model,
     title: buildCommandSessionTitle(command),
+    ...(typeof owner === 'number' && owner > 0 ? { studio_user_id: owner } : {}),
   })
 }
 

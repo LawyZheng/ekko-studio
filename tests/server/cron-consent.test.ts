@@ -702,7 +702,7 @@ describe('trusted current-session automation', () => {
     await setPolicy(true)
     const token = capability()
     for (const other of [users.member.modelRun, users.member.token]) expect((await admit(other, newScript)).status).toBe(403)
-    for (const key of ['session_id', 'sessionId', 'target_session_id', 'context_id', 'account_id', 'user_id', 'expected_session_generation']) {
+    for (const key of ['session_id', 'sessionId', 'context_id', 'account_id', 'user_id', 'expected_session_generation']) {
       expect((await admit(token, { ...newScript, [key]: 'chat-2' })).body.error).toBe('destination_override_refused')
     }
     expect((await call('GET', '/api/hermes/jobs?profile=default', token)).status).toBe(403)
@@ -856,13 +856,173 @@ describe('trusted current-session automation', () => {
     await setPolicy(true)
     expect((await dispatch({ session_id: 'chat-1', ...newScript }, users.member.modelRun)).status).toBe(403)
     expect((await dispatch({ session_id: 'peer-1', ...newScript })).body.error).toBe('session_account_mismatch')
-    expect((await dispatch({ session_id: 'chat-1', ...newScript, target_session_id: 'chat-2' })).body.error).toBe('destination_override_refused')
+    expect((await dispatch({ session_id: 'chat-1', ...newScript, deliver: 'slack:C1' })).body.error).toBe('destination_override_refused')
     const done = await dispatch({ session_id: 'chat-1', ...newScript })
     expect(done).toMatchObject({ status: 201, body: { status: 'admitted', session_id: 'chat-1', job_id: 'job4' } })
     expect(dispatched).toEqual([{ profile: 'default', sessionId: 'chat-1', capability: 'string',
       arguments: { method: 'POST', path: '/api/hermes/cron/current-session', body: { profile: 'default', ...newScript } } }])
     expect(replay.status).toBe(409)
     expect(bindingRows()).toHaveLength(1)
+  })
+
+  describe('explicit cross-session target (origin B authority, destination A, no approval)', () => {
+    const gen = (id: string) => m.store.getSessionGeneration(id)
+    const toTwo = { target_session_id: 'chat-2' }
+    const setOwner = (sessionId: string, accountId: number) => m.db.prepare('UPDATE sessions SET studio_user_id=? WHERE id=?').run(String(accountId), sessionId)
+
+    it('admits every operation from the origin into the target with its frozen owner; nothing reaches the origin and no card is shown', async () => {
+      await setPolicy(true)
+      const token = capability('chat-1')
+      const created = await admit(token, { ...newAgent, ...toTwo })
+      expect(created).toMatchObject({ status: 201, body: { status: 'admitted', kind: 'cron_job', session_id: 'chat-1', target_session_id: 'chat-2', job_id: 'job4' } })
+      expect((await admit(token, { ...newScript, ...toTwo })).body).toMatchObject({ session_id: 'chat-1', target_session_id: 'chat-2', job_id: 'job5' })
+      expect((await admit(token, { ...adopt, ...toTwo })).status).toBe(201)
+      expect((await admit(token, { ...bindAgent, ...toTwo })).status).toBe(201)
+      expect(cronBindings().map((row: any) => [row.job_id, row.session_id, row.session_generation === gen('chat-2'), row.account_id, row.target_owner, typeof row.trusted_epoch]).sort()).toEqual([
+        ['agent1', 'chat-2', true, users.member.id, users.member.id, 'string'], ['job4', 'chat-2', true, users.member.id, users.member.id, 'string'],
+      ])
+      expect(bindingRows().map((row: any) => [row.job_id, row.session_id, row.state, row.target_owner])).toEqual([
+        ['job5', 'chat-2', 'active', users.member.id], ['legacy1', 'chat-2', 'active', users.member.id],
+      ])
+      expect([job('job4').enabled, job('job5').enabled, job('legacy1').enabled, job('agent1').enabled]).toEqual([true, true, true, true])
+      expect(published).toEqual([])
+      expect((await list('chat-1')).body.requests).toEqual([])
+      // Naming the origin itself keeps the same-session contract (no owner fence).
+      expect((await admit(token, { ...newScript, name: 'Own digest', target_session_id: 'chat-1' })).body).toMatchObject({ session_id: 'chat-1', job_id: 'job6' })
+      expect(bindingRows().find((row: any) => row.job_id === 'job6')).toMatchObject({ session_id: 'chat-1', target_owner: null })
+    })
+
+    it('refuses unknown, deleted, unattributed, foreign and other-profile targets before any native call; every other override stays refused', async () => {
+      await setPolicy(true)
+      const token = capability('chat-1')
+      m.store.createSession({ id: 'other-own', profile: 'other', source: 'cli', studio_user_id: users.member.id, title: 'Other profile' })
+      m.store.createSession({ id: 'gone', profile: 'default', source: 'cli', studio_user_id: users.member.id, title: 'Gone' })
+      m.store.deleteSession('gone')
+      const cases: Array<[string, string]> = [['nope', 'target_session_not_found'], ['gone', 'target_session_not_found'], ['other-own', 'target_session_not_found'],
+        ['unowned-1', 'target_session_unattributed'], ['peer-1', 'target_session_account_mismatch']]
+      for (const [target, error] of cases) {
+        for (const operation of [newAgent, newScript, adopt, bindAgent]) {
+          expect((await admit(token, { ...operation, target_session_id: target })).body.error, `${target} ${operation.kind}`).toBe(error)
+        }
+      }
+      for (const key of ['session_id', 'sessionId', 'context_id', 'account_id', 'user_id', 'expected_session_generation', 'session_generation', 'deliver']) {
+        expect((await admit(token, { ...newScript, ...toTwo, [key]: 'chat-2' })).body.error, key).toBe('destination_override_refused')
+      }
+      expect([cli.calls, guard.calls, cronBindings(), bindingRows()]).toEqual([[], [], [], []])
+    })
+
+    it('rechecks origin, policy and target after the native create: any change stops before binding, the job stays paused and is reported', async () => {
+      await setPolicy(true)
+      const active = { live: true }
+      const changes: Array<[() => unknown, string]> = [
+        [() => m.store.clearSessionMessages('chat-2'), 'session_generation_mismatch'],
+        [() => setOwner('chat-2', users.peer.id), 'target_session_account_mismatch'],
+        [() => { active.live = false }, 'execution_ended'],
+      ]
+      let id = 4
+      for (const [change, error] of changes) {
+        let release!: () => void
+        cli.createGate = new Promise(resolve => { release = resolve })
+        const admission = admit(capability('chat-1', users.member.id, active), { ...newAgent, name: `Brief ${id}`, ...toTwo })
+        await until(() => commands().filter(command => command === 'create').length === id - 3, 'native create entered')
+        change()
+        release()
+        expect((await admission).body, error).toMatchObject({ error, job_id: `job${id}` })
+        expect(job(`job${id}`).enabled).toBe(false)
+        id += 1
+        setOwner('chat-2', users.member.id); active.live = true
+      }
+      expect(cronBindings()).toEqual([])
+    })
+
+    it('adopts an existing agent job only paused and quiescent: pause, bind, then restore its schedule; a busy job is refused, left paused and reported', async () => {
+      await setPolicy(true)
+      const token = capability('chat-1')
+      const ledger = new DatabaseSync(join(hermesHome, 'cron', 'executions.db'))
+      ledger.exec('CREATE TABLE executions (id TEXT PRIMARY KEY, job_id TEXT, status TEXT)')
+      ledger.prepare("INSERT INTO executions VALUES ('e1', 'agent1', 'claimed')").run()
+      expect((await admit(token, { ...bindAgent, ...toTwo })).body).toMatchObject({ error: 'job_busy', job_id: 'agent1' })
+      expect(commands()).toEqual(['pause'])
+      expect(job('agent1').enabled).toBe(false)
+      expect(cronBindings()).toEqual([])
+      ledger.exec('DELETE FROM executions'); ledger.close()
+      job('agent1').enabled = true; saveJobs(); cli.calls = []
+      let boundAtResume: string[] = []
+      cli.onResume = () => { boundAtResume = cronBindings().map((row: any) => row.session_id) }
+      expect((await admit(token, { ...bindAgent, ...toTwo })).status).toBe(201)
+      expect(commands()).toEqual(['pause', 'resume'])
+      expect(boundAtResume).toEqual(['chat-2'])
+      expect(job('agent1').enabled).toBe(true)
+      // A job the user keeps paused is bound without being resumed.
+      cli.jobs.push({ ...structuredClone(job('agent1')), id: 'agent2', name: 'Paused brief', enabled: false }); saveJobs(); cli.calls = []
+      expect((await admit(token, { ...bindAgent, job_id: 'agent2', ...toTwo })).status).toBe(201)
+      expect(commands()).toEqual([])
+      expect(job('agent2').enabled).toBe(false)
+    })
+
+    it('script adoption rechecks the destination after the pause, before rewriting the job', async () => {
+      await setPolicy(true)
+      cli.afterSave = command => { if (command === 'pause') m.store.clearSessionMessages('chat-2') }
+      expect((await admit(capability('chat-1'), { ...adopt, ...toTwo })).body).toMatchObject({ error: 'session_generation_mismatch', job_id: 'legacy1' })
+      expect(commands()).toEqual(['pause'])
+      expect(job('legacy1')).toMatchObject({ enabled: false, script: 'reports/legacy.sh' })
+      expect(bindingRows().map((row: any) => row.state)).toEqual(['failed'])
+    })
+
+    it('a lost script resume acknowledgment is reconciled like an agent job: binding failed, paused again and read back, id reported', async () => {
+      await setPolicy(true)
+      cli.onResume = () => { saveJobs(); throw new Error('connection reset') }
+      expect((await admit(capability('chat-1'), { ...newScript, ...toTwo })).body).toMatchObject({ error: 'native_resume_uncertain', job_id: 'job4' })
+      expect(commands()).toEqual(['create', 'edit', 'resume', 'pause'])
+      expect(job('job4').enabled).toBe(false)
+      expect(bindingRows()[0].state).toBe('failed')
+      expect(existsSync(m.paths.scriptReportRevokedMarker(bindingRows()[0].binding_id))).toBe(true)
+    })
+
+    it('refuses trusted adoption of a job with an external failure delivery lane', async () => {
+      await setPolicy(true)
+      job('agent1').failure_deliver = 'slack:C1'; job('legacy1').failure_deliver = 'telegram:1'; saveJobs()
+      for (const operation of [bindAgent, adopt]) {
+        for (const extra of [{}, toTwo]) expect((await admit(capability('chat-1'), { ...operation, ...extra })).body.error).toBe('explicit_delivery_target')
+      }
+      expect([cli.calls, guard.calls, cronBindings(), bindingRows()]).toEqual([[], [], [], []])
+    })
+
+    it('delivers repeated fires only to the target while its owner holds; observation is prospective from the binding', async () => {
+      await setPolicy(true)
+      expect((await admit(capability('chat-1'), { ...bindAgent, ...toTwo })).status).toBe(201)
+      const asked: any[] = []
+      const run = async (execution: string) => {
+        const delivered: any[] = []
+        await m.observer.observeCronBindings({
+          namespace: m.notifications.studioInstanceId(), bindingsPath: m.notifications.cronBindingsDbPath(),
+          observe: async (_profile: string, jobs: any[]) => { asked.push(...jobs); return { jobs: [{ job_id: 'agent1', state: 'present', deliver: 'local' }], executions: [fire('agent1', execution)] } },
+          getSession: (id: string) => ({ profile: 'default', generation: m.store.getSessionGeneration(id) }),
+          publish: (record: any) => delivered.push([record.payload?.job_id, record.session_id]),
+        })
+        return delivered
+      }
+      expect(await run('e1')).toEqual([['agent1', 'chat-2']])
+      expect(await run('e2')).toEqual([['agent1', 'chat-2']])
+      expect(asked[0].since).toBe(cronBindings()[0].bound_at)
+      const accepted = m.inbox.getSessionNotification(m.notifications.studioInstanceId(), 'default', 'cron:agent1:e1')
+      expect(accepted.payload.trusted).toMatchObject({ account_id: users.member.id, owner: users.member.id })
+      setOwner('chat-2', users.peer.id)
+      expect(await run('e3')).toEqual([])
+      expect(m.inbox.getSessionNotification(m.notifications.studioInstanceId(), 'default', 'cron:agent1:e3')?.disposition).toBe('owner_missing')
+    })
+
+    it('dispatch: a login user runs the same model-free admission into another own session', async () => {
+      m.chatRun.setChatRunServer({
+        ...m.chatRun.getChatRunServer(),
+        dispatchCurrentSessionCron: async (input: any) => call(input.arguments.method, input.arguments.path, input.capability, input.arguments.body),
+      })
+      await setPolicy(true)
+      const dispatch = (body: Record<string, unknown>) => call('POST', '/api/hermes/cron/current-session/dispatch', users.member.token, { profile: 'default', session_id: 'chat-1', ...body })
+      expect((await dispatch({ ...newScript, target_session_id: 'peer-1' })).body.error).toBe('target_session_account_mismatch')
+      expect((await dispatch({ ...newScript, ...toTwo })).body).toMatchObject({ status: 'admitted', session_id: 'chat-1', target_session_id: 'chat-2', job_id: 'job4' })
+      expect(bindingRows().map((row: any) => [row.job_id, row.session_id])).toEqual([['job4', 'chat-2']])
+    })
   })
 })
 

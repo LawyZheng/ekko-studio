@@ -5,9 +5,14 @@ does not repeat the create-time scan, so the job's current target is checked her
 function Hermes calls in ``create_job``. Read-only: imports the installed Hermes checkout, reads the
 script through Hermes' resolver (relative to ``$HERMES_HOME/scripts``) and writes nothing.
 
+Like every Hermes entry point (and Studio's Bridge), it imports ``hermes_bootstrap`` first: that activates the
+checkout's managed dependencies or re-executes into its managed interpreter, so the guard imports the same way
+under whichever Python Studio selected (without it, ``cron.jobs`` cannot import its third-party dependencies).
+
 Exit codes: 0 allowed, 3 refused by the guard (reason on stdout), 4 guard unavailable.
 """
 
+import importlib
 import sys
 
 
@@ -16,6 +21,12 @@ def main() -> int:
         print("usage: ekko_native_guard_check.py <script>", file=sys.stderr)
         return 4
     try:
+        try:
+            importlib.import_module("hermes_bootstrap")
+        except ModuleNotFoundError as error:
+            if error.name != "hermes_bootstrap":
+                raise
+            # Older Hermes runtimes do not have a bootstrap module.
         from cron.lifecycle_guard import check_gateway_lifecycle
     except Exception as error:  # noqa: BLE001 - any import failure means the guard cannot vouch
         print(f"native lifecycle guard unavailable: {type(error).__name__}", file=sys.stderr)

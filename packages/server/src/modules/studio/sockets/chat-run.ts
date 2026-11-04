@@ -39,7 +39,7 @@ import { runMcpCredentials } from '../services/auth/run-mcp-credentials'
 import { saveTaskPlan } from '../repositories/task-plan-store'
 import { getSessionTasks, updateSessionTasks, SessionTasksError } from '../services/session-tasks'
 import { getSessionTaskPlans } from '../services/task-plans'
-import { observeCronBindings } from '../services/session-notifications/cron-observer'
+import { observeCronBindings, targetOwnerCurrent } from '../services/session-notifications/cron-observer'
 import { noticeToMessage, withSessionNotices } from '../services/session-notifications/presentation'
 import {
   acceptSessionNotification,
@@ -2552,10 +2552,12 @@ export class ChatRunSocket {
    */
   publishSessionNotice(record: SessionNotificationRecord) {
     // A policy-created notice goes live only while its policy epoch and session generation still hold.
-    const trusted = (record.payload as { trusted?: { account_id?: unknown; epoch?: unknown } } | undefined)?.trusted
+    const trusted = (record.payload as { trusted?: { account_id?: unknown; epoch?: unknown; owner?: unknown } } | undefined)?.trusted
     if (trusted && !(typeof trusted.account_id === 'number' && typeof trusted.epoch === 'string'
       && trustedCronPolicyCurrent(trusted.account_id, record.profile, trusted.epoch)
-      && getSessionGeneration(record.session_id) === record.session_generation)) return
+      && getSessionGeneration(record.session_id) === record.session_generation
+      // A cross-session target must still belong to the owner frozen at admission.
+      && (trusted.owner === undefined || (typeof trusted.owner === 'number' && targetOwnerCurrent(trusted.owner, record.session_id))))) return
     const session = getSession(record.session_id)
     // Caller-supplied and script-reported notices are re-fenced and re-authorized at publication.
     const external = record.kind === 'external' || record.kind === 'script_report'

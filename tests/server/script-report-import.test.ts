@@ -56,7 +56,7 @@ const jobs: any[] = []
 function saveJobs() { mkdirSync(join(hermesHome, 'cron'), { recursive: true }); writeFileSync(join(hermesHome, 'cron', 'jobs.json'), JSON.stringify({ jobs })) }
 
 /** An active binding with its manifest, generated wrapper and native job, as enrollment leaves it. */
-function bind(script: string, body: string) {
+function bind(script: string, body: string, targetOwner?: number) {
   const target = join(hermesHome, 'scripts', 'reports', script)
   writeFileSync(target, body)
   const bindingId = randomUUID()
@@ -72,7 +72,8 @@ function bind(script: string, body: string) {
   writeFileSync(join(hermesHome, 'scripts', wrapperScript), m.wrapper.renderWrapper(manifest), { mode: 0o700 })
   m.reports.insertScriptReportBinding({ binding_id: bindingId, revision: 1, namespace: m.instance(), profile: 'default',
     session_id: 'chat-1', session_generation: m.store.getSessionGeneration('chat-1'), account_id: member.id,
-    job_name: `Job ${script}`, target_script: `reports/${script}`, wrapper_script: wrapperScript })
+    job_name: `Job ${script}`, target_script: `reports/${script}`, wrapper_script: wrapperScript,
+    ...(targetOwner === undefined ? {} : { target_owner: targetOwner }) })
   const jobId = `job-${bindingId.slice(0, 8)}`
   m.reports.transitionScriptReportBinding(bindingId, ['enrolling'], 'active', { job_id: jobId })
   jobs.push({ id: jobId, script: wrapperScript, no_agent: true, deliver: 'local', enabled: true })
@@ -201,6 +202,27 @@ describe('script report import', () => {
     expect(notices()).toEqual([])
     const details = (m.db.prepare('SELECT detail FROM script_report_invocations ORDER BY rowid').all() as any[]).map(row => row.detail)
     expect(details).toEqual(['owner_missing', 'account_forbidden', 'binding_revoked'])
+  })
+
+  it('a cross-session binding imports only while its target keeps the frozen owner, and carries that owner for publication', () => {
+    const peer = m.users.createUser({ username: 'peer', password: 'password-1', role: 'admin', status: 'active', profiles: ['default'] })
+    const setOwner = (accountId: number) => m.db.prepare('UPDATE sessions SET studio_user_id=? WHERE id=?').run(String(accountId), 'chat-1')
+    setOwner(member.id)
+    const owned = bind('owned.py', 'print("owned")\n', member.id)
+    fire(owned)
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(1)
+    setOwner(peer.id)
+    fire(owned)
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(1)
+    const details = (m.db.prepare('SELECT detail FROM script_report_invocations ORDER BY rowid').all() as any[]).map(row => row.detail)
+    expect(details).toEqual([null, 'owner_missing'])
+    // A same-session binding (no owner fence) keeps the existing unattributed/owner semantics.
+    const plain = bind('plain.py', 'print("plain")\n')
+    fire(plain)
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(2)
   })
 
   it('F6: stops importing when the native job is edited away from the enrolled wrapper or local delivery', () => {
