@@ -512,17 +512,42 @@ const moduleHints = {
     purpose: 'Review and approve Hermes Agent write operations.',
     keywords: ['approval', 'write gate', 'review'],
   },
+  'Cron Consent': {
+    purpose: 'Deliver recurring Cron results into chats. With trusted automation on, POST /api/hermes/cron/current-session creates, adopts or binds a job without approval, into this chat or target_session_id (another chat of the same account); otherwise (403) ask with POST /api/hermes/cron/consent-requests.',
+    keywords: ['cron', 'schedule', 'recurring', 'report', 'deliver results', 'another chat', 'target session'],
+  },
+}
+
+const CRON_KIND = 'cron_job: new agent job (name, schedule, prompt); cron_session_binding: an existing agent job (job_id); script_report_enrollment: a no_agent script job (mode).'
+const CRON_MODE = { enum: ['new', 'existing'], description: 'script_report_enrollment only: new (name, schedule, script) or existing (job_id).' }
+const CRON_TARGET = { description: 'Optional: deliver into this other chat of the same account and profile instead of the current one.' }
+/** Routing guidance compact discovery keeps for the Cron delivery operations (other operations stay compact). */
+const operationHints = {
+  'POST /api/hermes/cron/current-session': {
+    usage: 'Trusted automation (policy on): admits without an approval card; results go to the current chat, or to target_session_id. 403 trusted_capability_required: the policy is off, use POST /api/hermes/cron/consent-requests.',
+    fields: { kind: { enum: ['cron_job', 'cron_session_binding', 'script_report_enrollment'], description: CRON_KIND }, mode: CRON_MODE, target_session_id: CRON_TARGET },
+  },
+  'POST /api/hermes/cron/current-session/dispatch': {
+    usage: 'Login only: the same trusted admission for a selected session_id, without a model.',
+    fields: { kind: { enum: ['cron_job', 'cron_session_binding', 'script_report_enrollment'], description: CRON_KIND }, mode: CRON_MODE, target_session_id: CRON_TARGET },
+  },
+  'POST /api/hermes/cron/consent-requests': {
+    usage: 'Policy off: asks the user to approve in the chat (202 pending). With trusted automation on, use POST /api/hermes/cron/current-session instead.',
+    fields: { kind: { enum: ['cron_session_binding', 'script_report_enrollment'], description: CRON_KIND }, mode: CRON_MODE, target_session_id: CRON_TARGET },
+  },
 }
 
 function compactOperation(path, method, operation) {
   const parameters = compactParameters(operation.parameters)
-  const body = compactBodyFields(operation.requestBody)
+  const hint = operationHints[`${method.toUpperCase()} ${path}`]
+  const body = compactBodyFields(operation.requestBody).map(field => ({ ...field, ...(hint?.fields?.[field.name] || {}) }))
   return {
     method: method.toUpperCase(),
     path,
     ...(operation.operationId ? { operationId: operation.operationId } : {}),
     ...(Array.isArray(operation.tags) && operation.tags.length ? { tags: operation.tags } : {}),
     ...(operation.summary ? { summary: operation.summary } : {}),
+    ...(hint?.usage ? { usage: hint.usage } : {}),
     ...(parameters.path.length ? { pathParams: parameters.path } : {}),
     ...(parameters.query.length ? { queryParams: parameters.query } : {}),
     ...(operation.requestBody ? {
@@ -1195,7 +1220,7 @@ const tools = [
   {
     name: 'ekko_studio_api_request',
     toolset: 'api',
-    description: 'Execute a Ekko Studio operation by calling an endpoint path. Use ekko_studio_api_openapi_get first as the operation manual to inspect method, parameters, requestBody, and responses. Do not use /api/studio/chat-run/* or /api/studio/sessions/* as an internal delegation mechanism.',
+    description: 'Execute a Ekko Studio operation by calling an endpoint path. Use ekko_studio_api_openapi_get first as the operation manual to inspect method, parameters, requestBody, and responses. Do not use /api/studio/chat-run/* or /api/studio/sessions/* as an internal delegation mechanism. To deliver recurring Cron results into this chat or another chat of the same account (target_session_id), call /api/hermes/cron/current-session; if it answers 403 (trusted automation off), use /api/hermes/cron/consent-requests.',
     inputSchema: inputSchema({
         method: {
           type: 'string',

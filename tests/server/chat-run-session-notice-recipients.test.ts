@@ -3,6 +3,8 @@ import * as chatRuntime from '../../packages/server/src/modules/studio/public/ch
 import { initAllHermesTables } from '../../packages/server/src/modules/studio/infrastructure/database/schemas'
 import { clearSessionMessages, createSession, deleteSession, getSessionGeneration } from '../../packages/server/src/modules/studio/repositories/session-store'
 import { createUser, updateUser } from '../../packages/server/src/modules/studio/repositories/users-store'
+import { trustedCronPolicy, updateTrustedCronPolicy } from '../../packages/server/src/modules/studio/public/trusted-cron'
+import { getDb } from '../../packages/server/src/modules/studio/infrastructure/database/index'
 import { SessionShareError } from '../../packages/server/src/modules/studio/contracts/session-shares'
 import { sessionShareService } from '../../packages/server/src/modules/studio/services/session-shares/service'
 import { ChatRunSocket } from '../../packages/server/src/modules/studio/sockets/chat-run'
@@ -409,5 +411,33 @@ describe('external notices are re-fenced and re-authorized against current state
 
     expect(updates(viewer)).toHaveLength(1)
     expect(updates(disabled)).toHaveLength(0)
+  })
+})
+
+describe('trusted cross-session notices are published only while the target keeps its frozen owner', () => {
+  it('reaches the owner while it holds; nobody once the target changes owner; same-session trusted notices are unaffected', async () => {
+    initAllHermesTables()
+    const sid = sessionId()
+    const suffix = `${Date.now()}-${counter += 1}`
+    const member = createUser({ username: `owner-${suffix}`, password: 'password-1', role: 'admin', profiles: ['default'] })!
+    const peer = createUser({ username: `peer-${suffix}`, password: 'password-1', role: 'admin', profiles: ['default'] })!
+    createSession({ id: sid, profile: 'default', source: 'cli', studio_user_id: member.id })
+    updateTrustedCronPolicy(member.id, 'default', true, trustedCronPolicy(member.id, 'default').revision)
+    const epoch = trustedCronPolicy(member.id, 'default').epoch
+    const { server, connect } = makeServer()
+    const viewer = connect('owner-viewer', { user: { id: member.id, role: 'admin', profiles: ['default'] } })
+    const notice = (content: string, owner?: number) => ({ ...record(sid, 'default'), session_generation: getSessionGeneration(sid),
+      payload: { ...record(sid, 'default').payload, content, trusted: { account_id: member.id, epoch, ...(owner === undefined ? {} : { owner }) } } })
+    server.publishSessionNotice(notice('OWNED_RESULT', member.id))
+    expect(JSON.stringify(viewer.received)).toContain('OWNED_RESULT')
+    getDb().prepare('UPDATE sessions SET studio_user_id=? WHERE id=?').run(String(peer.id), sid)
+    server.publishSessionNotice(notice('MOVED_RESULT', member.id))
+    expect(JSON.stringify(viewer.received)).not.toContain('MOVED_RESULT')
+    // Without a frozen owner (same-session trusted binding) publication keeps its existing rules.
+    getDb().prepare('UPDATE sessions SET studio_user_id=? WHERE id=?').run(String(member.id), sid)
+    server.publishSessionNotice(notice('SAME_SESSION_RESULT'))
+    expect(JSON.stringify(viewer.received)).toContain('SAME_SESSION_RESULT')
+    server.publishSessionNotice(notice('OWNED_AGAIN_RESULT', member.id))
+    expect(JSON.stringify(viewer.received)).toContain('OWNED_AGAIN_RESULT')
   })
 })
