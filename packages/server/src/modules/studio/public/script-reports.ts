@@ -48,6 +48,7 @@ export function beginScriptReportBinding(input: {
   targetScript: string
   wrapperScript: string
   trustedEpoch?: string | null
+  targetOwner?: number | null
 }): ScriptReportBinding {
   return insertScriptReportBinding({
     binding_id: input.bindingId,
@@ -61,6 +62,7 @@ export function beginScriptReportBinding(input: {
     target_script: input.targetScript,
     wrapper_script: input.wrapperScript,
     trusted_epoch: input.trustedEpoch ?? null,
+    target_owner: input.targetOwner ?? null,
   })
 }
 

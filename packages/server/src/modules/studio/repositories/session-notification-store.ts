@@ -295,6 +295,8 @@ export interface CronSessionBinding {
   account_id: number | null
   /** Trusted-automation policy epoch that created this binding; null for consent and direct bindings. */
   trusted_epoch: string | null
+  /** Frozen owner a cross-session target must keep; null for every other binding. */
+  target_owner: number | null
 }
 
 /** Bindings written by the Agent Bridge cronjob middleware for this Studio instance. */
@@ -312,6 +314,7 @@ export function readCronSessionBindings(path: string, instanceId: string): CronS
       session_generation: row.session_generation ? String(row.session_generation) : null,
       account_id: row.account_id === null || row.account_id === undefined ? null : Number(row.account_id),
       trusted_epoch: row.trusted_epoch ? String(row.trusted_epoch) : null,
+      target_owner: row.target_owner === null || row.target_owner === undefined ? null : Number(row.target_owner),
     }))
   } catch (err: any) {
     if (/no such table/i.test(String(err?.message || ''))) return []

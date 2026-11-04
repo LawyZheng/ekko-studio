@@ -54,6 +54,8 @@ function openBindings(): DatabaseSync {
   if (!columns.has('account_id')) db.exec('ALTER TABLE cron_session_bindings ADD COLUMN account_id INTEGER')
   // Trusted-automation epoch of a policy-created binding; NULL for consent and direct bindings.
   if (!columns.has('trusted_epoch')) db.exec('ALTER TABLE cron_session_bindings ADD COLUMN trusted_epoch TEXT')
+  // Frozen owner of a cross-session target (trusted admission); NULL keeps the existing destination rules.
+  if (!columns.has('target_owner')) db.exec('ALTER TABLE cron_session_bindings ADD COLUMN target_owner INTEGER')
   return db
 }
 
@@ -92,6 +94,7 @@ export function writeCronSessionBinding(input: {
   expectedRevision?: CronBindingRevision | null
   accountId?: number | null
   trustedEpoch?: string | null
+  targetOwner?: number | null
 }): boolean {
   const db = openBindings()
   try {
@@ -110,9 +113,10 @@ export function writeCronSessionBinding(input: {
     }
     const boundAt = Math.max(Date.now() / 1000, previous ? Number(previous.bound_at) + 0.001 : 0)
     db.prepare(`INSERT OR REPLACE INTO cron_session_bindings (instance_id, profile, job_id, session_id, bound_at,
-        requested_deliver, stored_deliver, requested_paused, session_generation, account_id, trusted_epoch) VALUES (?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?)`)
+        requested_deliver, stored_deliver, requested_paused, session_generation, account_id, trusted_epoch, target_owner)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?, ?)`)
       .run(studioInstanceId(), input.profile, input.jobId, input.sessionId, boundAt, input.storedDeliver, input.generation,
-        input.accountId ?? null, input.trustedEpoch ?? null)
+        input.accountId ?? null, input.trustedEpoch ?? null, input.targetOwner ?? null)
     db.exec('COMMIT')
   } catch (error) {
     try { db.exec('ROLLBACK') } catch { /* not in a transaction */ }
