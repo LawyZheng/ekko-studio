@@ -204,6 +204,40 @@ describe('script report import', () => {
     expect(details).toEqual(['owner_missing', 'account_forbidden', 'binding_revoked'])
   })
 
+  it('a trusted cross-session binding: import carries the frozen owner into publication; an owner change after import stops publication and import', async () => {
+    const { updateTrustedCronPolicy, trustedCronPolicy } = await import(`${STUDIO}/public/trusted-cron`)
+    const chatRuntime = await import(`${STUDIO}/public/chat-agent-runtime`)
+    const { ChatRunSocket } = await import(`${STUDIO}/sockets/chat-run`)
+    const peer = m.users.createUser({ username: 'peer', password: 'password-1', role: 'admin', status: 'active', profiles: ['default'] })
+    const setOwner = (accountId: number) => m.db.prepare('UPDATE sessions SET studio_user_id=? WHERE id=?').run(String(accountId), 'chat-1')
+    setOwner(member.id)
+    updateTrustedCronPolicy(member.id, 'default', true, 0)
+    const epoch = trustedCronPolicy(member.id, 'default').epoch
+    const binding = bind('trusted.py', 'print("trusted report")\n', member.id)
+    m.db.prepare('UPDATE script_report_bindings SET trusted_epoch=? WHERE binding_id=?').run(epoch, binding.binding_id)
+    // The production publication path with one authorized viewer of the target session.
+    vi.spyOn(chatRuntime, 'createPrimaryAgentBridge').mockReturnValue({} as any)
+    const received: any[] = []
+    const viewer = { id: 'viewer', connected: true, rooms: new Set(['session:chat-1']), data: { user: { id: member.id, role: 'admin', profiles: ['default'] } }, emit: (event: string, payload: any) => received.push([event, payload]) }
+    const rooms = new Map([['session:chat-1', new Set(['viewer'])]])
+    const nsp: any = { use: vi.fn(), on: vi.fn(), to: () => ({ emit: vi.fn() }), in: () => ({ socketsLeave: vi.fn() }), emit: vi.fn(), adapter: { rooms }, sockets: new Map([['viewer', viewer]]) }
+    const server: any = new ChatRunSocket({ of: () => nsp } as any)
+    vi.spyOn(server, 'canAccessProfile').mockReturnValue(true)
+    const notices = () => received.filter(([event]) => event === 'session.notice').map(([, payload]) => payload.message.studio_notice?.content ?? payload.message.content)
+    fire(binding)
+    const [accepted] = m.importer.importScriptReports().accepted
+    expect(accepted.payload.trusted).toEqual({ account_id: member.id, epoch, owner: member.id })
+    server.publishSessionNotice(accepted)
+    expect(JSON.stringify(notices())).toContain('trusted report')
+    // The owner changes after the import accepted the report: publication of that record stops, and so does import.
+    setOwner(peer.id)
+    received.length = 0
+    server.publishSessionNotice(accepted)
+    expect(notices()).toEqual([])
+    fire(binding)
+    expect(m.importer.importScriptReports().accepted).toEqual([])
+  })
+
   it('a cross-session binding imports only while its target keeps the frozen owner, and carries that owner for publication', () => {
     const peer = m.users.createUser({ username: 'peer', password: 'password-1', role: 'admin', status: 'active', profiles: ['default'] })
     const setOwner = (accountId: number) => m.db.prepare('UPDATE sessions SET studio_user_id=? WHERE id=?').run(String(accountId), 'chat-1')

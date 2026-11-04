@@ -447,13 +447,14 @@ async function resumeVerified(bindingId: string, profile: string, jobId: string,
   }
   let resumed: Record<string, any> | null = null
   try { resumed = readNativeJob(profile, jobId) } catch { /* unreadable: an unknown state, reconciled below */ }
-  if (!invalid && resumed && resumed.enabled === true && resumed.script === wrapperRelative && jobFingerprint(resumed) !== expected) {
-    invalid = new EnrollmentError(409, 'job_changed')
-  }
-  // As for an agent job: a resume read back without effect failed; one without acknowledgment or readback is uncertain.
+  // As for an agent job: a resume read back without effect failed; one without acknowledgment or readback is uncertain;
+  // a job read back running anything but the approved wrapper configuration changed. All are reconciled below.
   const stillPaused = resumed?.enabled === false
   if (!invalid && stillPaused) invalid = new EnrollmentError(502, 'native_resume_failed')
   if (!invalid && (!acknowledged || !resumed)) invalid = new EnrollmentError(502, 'native_resume_uncertain')
+  if (!invalid && (resumed!.enabled !== true || resumed!.script !== wrapperRelative || jobFingerprint(resumed!) !== expected)) {
+    invalid = new EnrollmentError(409, 'job_changed')
+  }
   if (invalid) {
     failActivatedScriptReportBinding(bindingId, invalid.code)
     const marker = scriptReportRevokedMarker(bindingId)
@@ -469,11 +470,7 @@ async function resumeVerified(bindingId: string, profile: string, jobId: string,
     if (!paused) noteScriptReportBindingError(bindingId, `${invalid.code};native_pause_failed`)
     throw new EnrollmentError(invalid.status, invalid.code, paused ? undefined : 'native pause unverified', jobId)
   }
-  if (!resumed || resumed.enabled !== true || resumed.script !== wrapperRelative) {
-    noteScriptReportBindingError(bindingId, 'native_resume_unverified')
-    throw new EnrollmentError(502, 'native_resume_unverified', undefined, jobId)
-  }
-  return { binding: findScriptReportBinding(bindingId)!, job: resumed, resumed: true }
+  return { binding: findScriptReportBinding(bindingId)!, job: resumed!, resumed: true }
 }
 
 /** A frozen plan to start reporting future invocations of an EXISTING `no_agent` job. */

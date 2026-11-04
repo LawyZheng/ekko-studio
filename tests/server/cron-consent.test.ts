@@ -979,6 +979,23 @@ describe('trusted current-session automation', () => {
       expect(existsSync(m.paths.scriptReportRevokedMarker(bindingRows()[0].binding_id))).toBe(true)
     })
 
+    it('a resume read back running a different script is reconciled for new and adopted jobs: binding failed, job paused and read back, id reported', async () => {
+      await setPolicy(true)
+      const swapped: Record<string, string> = { job4: 'reports/digest.py', legacy1: 'reports/digest.py' }
+      cli.afterSave = command => {
+        if (command !== 'resume') return
+        for (const item of cli.jobs) if (swapped[item.id] && item.enabled) { item.script = swapped[item.id]; saveJobs() }
+      }
+      for (const [operation, jobId] of [[newScript, 'job4'], [adopt, 'legacy1']] as const) {
+        expect((await admit(capability('chat-1'), { ...operation, ...toTwo })).body, jobId).toMatchObject({ error: 'job_changed', job_id: jobId })
+        expect(commands().at(-1)).toBe('pause')
+        expect(job(jobId).enabled).toBe(false)
+        const binding = bindingRows().find((row: any) => row.job_id === jobId)
+        expect(binding.state).toBe('failed')
+        expect(existsSync(m.paths.scriptReportRevokedMarker(binding.binding_id))).toBe(true)
+      }
+    })
+
     it('refuses trusted adoption of a job with an external failure delivery lane', async () => {
       await setPolicy(true)
       job('agent1').failure_deliver = 'slack:C1'; job('legacy1').failure_deliver = 'telegram:1'; saveJobs()

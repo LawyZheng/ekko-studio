@@ -1330,4 +1330,48 @@ describe('hermes-web-ui MCP server', () => {
     expect(fields).toMatchObject({ profile: true, kind: true, name: false, schedule: false, prompt: false, script: false, mode: false, job_id: false })
     expect(fields).not.toHaveProperty('session_id')
   })
+
+  it('default discovery routes a normal agent to trusted admission (with a cross-session target) and explains kinds; consent is the policy-off path', async () => {
+    const openapi = readFileSync(join(process.cwd(), 'docs', 'openapi.json'), 'utf8')
+    const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(openapi) })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('expected TCP server address')
+    const responses = new Map<number, any>()
+    child = spawn(process.execPath, ['bin/ekko-studio-mcp.mjs', 'api'], {
+      cwd: process.cwd(), env: { ...process.env, HERMES_WEB_UI_URL: `http://127.0.0.1:${address.port}`, AUTH_TOKEN: 'test-token', HERMES_MCP_TOOLSET: '' },
+    })
+    child.stdout.on('data', chunk => {
+      for (const line of String(chunk).trim().split('\n')) if (line) { const message = JSON.parse(line); responses.set(message.id, message) }
+    })
+    writeRpc(child, 1, 'initialize', {})
+    writeRpc(child, 2, 'tools/list', {})
+    writeRpc(child, 3, 'tools/call', { name: 'ekko_studio_api_openapi_get', arguments: {} })
+    writeRpc(child, 4, 'tools/call', { name: 'ekko_studio_api_openapi_get', arguments: { tag: 'Cron Consent' } })
+    const tools = (await waitForRpc(responses, 2)).result.tools
+    const index = JSON.parse((await waitForRpc(responses, 3)).result.content[0].text)
+    const cron = JSON.parse((await waitForRpc(responses, 4)).result.content[0].text)
+    server.close()
+    // The request tool itself names the trusted route, the cross-session field and the policy-off fallback.
+    const request = tools.find((tool: any) => tool.name === 'ekko_studio_api_request').description
+    for (const text of ['/api/hermes/cron/current-session', 'target_session_id', '/api/hermes/cron/consent-requests']) expect(request).toContain(text)
+    // The default module index (no filters) already carries the routing rule.
+    const module = index.modules.find((item: any) => item.tag === 'Cron Consent')
+    for (const text of ['current-session', 'target_session_id', 'consent-requests']) expect(module.purpose).toContain(text)
+    const operation = (method: string, path: string) => cron.operations.find((item: any) => item.method === method && item.path === path)
+    const fields = (op: any) => Object.fromEntries(op.requestBody.fields.map((field: any) => [field.name, field]))
+    const trusted = operation('POST', '/api/hermes/cron/current-session')
+    expect(trusted.usage).toContain('target_session_id')
+    expect(trusted.usage).toContain('consent-requests')
+    expect(fields(trusted).kind).toMatchObject({ enum: ['cron_job', 'cron_session_binding', 'script_report_enrollment'], description: expect.stringContaining('job_id') })
+    expect(fields(trusted).mode).toMatchObject({ enum: ['new', 'existing'], description: expect.stringContaining('script') })
+    expect(fields(trusted).target_session_id).toMatchObject({ required: false, description: expect.stringContaining('same account') })
+    expect(fields(operation('POST', '/api/hermes/cron/current-session/dispatch')).target_session_id.description).toContain('same account')
+    const consent = operation('POST', '/api/hermes/cron/consent-requests')
+    expect(consent.usage).toContain('current-session')
+    expect(fields(consent).kind.enum).toEqual(['cron_session_binding', 'script_report_enrollment'])
+    // Other operations keep the compact shape: no forwarded descriptions.
+    expect(operation('GET', '/api/hermes/cron/consent-requests')).not.toHaveProperty('usage')
+    expect(operation('GET', '/api/hermes/cron/consent-requests')).not.toHaveProperty('description')
+  })
 })
