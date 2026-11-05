@@ -1119,6 +1119,8 @@ export default {
       digest: "Skript-SHA-256",
       workdir: "Arbeitsverzeichnis",
       interpreter: "Interpreter",
+      completion: "Abschluss",
+      completionDetached: "Losgelöster Worker; das Ende des Launchers ist nicht das Ergebnis",
       prompt: "Job-Prompt",
       afterApproval: "Nach Freigabe",
       resumes: "Läuft nach Zeitplan",

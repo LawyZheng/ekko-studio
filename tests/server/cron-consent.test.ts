@@ -378,6 +378,16 @@ describe('frozen script plan', () => {
 })
 
 describe('existing no_agent job adoption', () => {
+  it('freezes an opt-in detached completion into the shown plan and the adopted binding', async () => {
+    expect((await request(turn('chat-1', users.member.id), { ...adopt, completion: 'eventually' })).body.error).toBe('invalid_completion')
+    const pending = await request(turn('chat-1', users.member.id), { ...adopt, completion: 'detached' })
+    expect((await list()).body.requests[0]).toMatchObject({ action: 'modify_job', job_id: 'legacy1', completion: 'detached' })
+    const approved = await approve(pending.body.request_id)
+    expect(approved.body.binding).toMatchObject({ state: 'active', job_id: 'legacy1', completion: 'detached' })
+    const manifest = JSON.parse(readFileSync(join(studioHome, 'script-reports', 'bindings', approved.body.binding.binding_id, 'manifest.r1.json'), 'utf8'))
+    expect(manifest).toMatchObject({ completion: 'detached' })
+  })
+
   it('guards, pauses, wraps, verifies and resumes the same job: no duplicate job', async () => {
     const pending = await request(turn('chat-1', users.member.id), adopt)
     expect((await list()).body.requests[0]).toMatchObject({ action: 'modify_job', job_id: 'legacy1', script: 'reports/legacy.sh', resume: true })

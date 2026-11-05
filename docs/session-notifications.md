@@ -252,6 +252,67 @@ notices, a shown report is projected once, as escaped untrusted data, into the s
 intentional question. The login API above stays available; model-initiated enrollment goes through
 consent requests.
 
+### Detached completion (opt-in)
+
+Some producers are fire-and-forget launchers: the scheduled script starts a worker in its own
+session (`setsid`), returns silently, and the worker composes and delivers the real report later.
+The default wrapper would report the silent launcher. Enrollment with `"completion": "detached"`
+(login `POST …/enrollments`, or a consent request `script_report_enrollment` in `mode: "new"` or
+`"existing"`; the card shows it) freezes another contract into the manifest and binding. Trusted
+current-session automation still enrolls synchronous reports only.
+
+```text
+Hermes scheduler -> wrapper (reserves invocation I) -> launcher exits 0 -> handoff.json (not a report)
+detached worker (inherits EKKO_SCRIPT_REPORT_*) -> python <wrapper> complete --event-id E ...
+  -> outbox envelope (E -> I, sanitized body, digest) -> final.json of I -> importer -> receipt of I
+```
+
+- **Handoff.** The launcher runs with `EKKO_SCRIPT_REPORT_INVOCATION` (its reserved invocation),
+  `EKKO_SCRIPT_REPORT_HELPER` (the generated wrapper) and `EKKO_SCRIPT_REPORT_PYTHON`. A clean exit
+  records `handoff.json`; a nonzero exit or a signal is reported as `failed`/`interrupted`. Until
+  the worker completes it, the invocation stays `incomplete` (`handed_off: true` in the health
+  list); nothing is inferred from time. The worker must not keep the launcher's stdout/stderr open.
+  A launcher that dedupes against a live worker should release its invocation as silence:
+  `"$EKKO_SCRIPT_REPORT_PYTHON" "$EKKO_SCRIPT_REPORT_HELPER" complete --outcome silent --event-id "dedupe:$EKKO_SCRIPT_REPORT_INVOCATION" --content-file /dev/null`.
+- **Completion.** `complete --event-id E --content-file PATH|- [--outcome output|silent|failed]
+  [--invocation I] [--wait SECONDS]` takes the destination from the wrapper's own manifest; it has no
+  session, account or kind argument. It refuses an invocation that this binding revision did not
+  reserve in detached mode (`invocation_not_reserved`). The body is sanitized and clipped like
+  captured output before the envelope `outbox/<binding>/<sha256(E)>.json` is written; that envelope
+  is durable before the report exists.
+- **Business identity.** `E` is the producer's stable event (for example one per report day). A
+  later `complete` for `E` reuses the envelope and its **original** invocation: identical submitted
+  bytes are a retry (the new invocation, if any, is recorded silently as `event_retry`; a missing
+  final report of the original is published from the envelope, with the same bytes), different bytes
+  are refused (`conflict`, exit 5, shown as a failure). A malformed envelope is never replaced.
+- **Receipt.** After the importer has made the disposition durable, and before it acknowledges the
+  spool entry, it writes `receipts/<binding>/<invocation>.json`: binding and revision, job, session
+  and generation, invocation, event, `retry_of`, `state` (`accepted`, `silent`, `rejected`,
+  `quarantined`), reason, `notification_id`, `submitted_sha256`, `accepted_sha256` and `exact`
+  (the stored body equals the submitted bytes; sanitization or truncation makes it false).
+  `receipt --event-id E` reads it. Exit codes: 0 accepted or silent, 3 queued or incomplete (keep the
+  pending draft), 4 rejected or quarantined, 5 conflict, 6 unknown, 2 error. A spool entry that
+  disappears, `queued` or the helper's stdout is never a delivery proof; commit business state only on
+  exit 0 with the expected `event_id` and `notification_id`.
+- **Authority.** Delivery needs no login token after enrollment: setup credentials may expire. Every
+  import fence above still applies (revocation, account and profile access, policy epoch, target
+  owner, session generation, native job configuration), and a rejection is recorded in the receipt,
+  never rerouted. The trust boundary is unchanged: any process of the same OS user can call the
+  helper or write these files; this is not an attestation of which executable produced a report.
+- **Worker recipe.** Persist the draft and its event id first (a later retry, even on another day,
+  resubmits that pair), submit it, and commit only on a matching receipt
+  (`tests/server/fixtures/detached-report/` is a complete launcher and worker):
+
+  ```bash
+  "$EKKO_SCRIPT_REPORT_PYTHON" "$EKKO_SCRIPT_REPORT_HELPER" complete \
+    --event-id "daily-report:$DAY" --content-file "$STATE/pending.md" --wait 60 > "$STATE/receipt.json"
+  # exit 0 + matching event_id and notification_id: commit and delete pending.md; anything else: keep it
+  ```
+- **Markdown.** Bodies render with the passive Markdown renderer. Convert Slack-style links in the
+  producer before submitting, deterministically, for example `<https://host/x|label>` to
+  `[label](https://host/x)` with `[`/`]` in the label escaped (see
+  `tests/server/fixtures/detached-report/worker.py`); Studio does not rewrite report bodies.
+
 ## Consent requests (model-initiated delivery)
 
 The direct binding and enrollment endpoints accept only a login credential. A model turn's ordinary

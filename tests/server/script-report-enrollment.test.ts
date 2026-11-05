@@ -124,6 +124,22 @@ describe('script report enrollment', () => {
     expect(statSync(m.paths.scriptReportsRoot()).mode & 0o777).toBe(0o700)
   })
 
+  it('detached completion is an explicit, frozen opt-in; the default stays synchronous', async () => {
+    expect(await enroll({ completion: 'later' })).toMatchObject({ status: 400, body: { error: 'invalid_completion' } })
+    expect(cli.calls).toEqual([])
+    const sync = (await enroll()).body.binding
+    const detached = (await enroll({ completion: 'detached' })).body.binding
+    expect([sync.completion, detached.completion]).toEqual(['sync', 'detached'])
+    const manifest = (binding: any) => JSON.parse(readFileSync(m.paths.scriptReportManifestPath(binding.binding_id, 1), 'utf8'))
+    expect(manifest(sync)).not.toHaveProperty('completion')
+    expect(manifest(detached)).toMatchObject({ completion: 'detached', outbox_dir: m.paths.scriptReportOutboxDir(detached.binding_id),
+      receipts_dir: m.paths.scriptReportReceiptsDir(detached.binding_id) })
+    for (const dir of [m.paths.scriptReportOutboxDir(detached.binding_id), m.paths.scriptReportReceiptsDir(detached.binding_id)]) {
+      expect(statSync(dir).mode & 0o777).toBe(0o700)
+    }
+    expect(existsSync(m.paths.scriptReportOutboxDir(sync.binding_id))).toBe(false)
+  })
+
   it('F2: a target refused by the native lifecycle guard creates nothing and leaves no wrapper', async () => {
     const refused = await enroll({ script: 'reports/restart.sh' })
     expect(refused.body).toMatchObject({ error: 'native_create_rejected' })

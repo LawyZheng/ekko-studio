@@ -630,6 +630,8 @@ export default {
       digest: "Betik SHA-256",
       workdir: "Çalışma dizini",
       interpreter: "Yorumlayıcı",
+      completion: "Tamamlama",
+      completionDetached: "Ayrık çalışan; başlatıcının çıkışı sonuç değildir",
       prompt: "İş istemi",
       afterApproval: "Onaydan sonra",
       resumes: "Zamanlamasına göre çalışır",

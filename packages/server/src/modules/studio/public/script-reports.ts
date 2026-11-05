@@ -11,6 +11,7 @@ import {
   setScriptReportBindingError,
   transitionScriptReportBinding,
   type ScriptReportBinding,
+  type ScriptReportCompletion,
 } from '../repositories/script-report-store'
 
 export * from './script-report-paths'
@@ -20,7 +21,7 @@ export {
   type NativeScriptJob,
   type ScriptReportJobInspector,
 } from '../services/session-notifications/script-reports'
-export type { ScriptReportBinding }
+export type { ScriptReportBinding, ScriptReportCompletion }
 
 export type DestinationVerdict = 'ok' | 'forbidden' | 'not_found' | 'unsupported' | 'generation_mismatch'
 
@@ -49,6 +50,7 @@ export function beginScriptReportBinding(input: {
   wrapperScript: string
   trustedEpoch?: string | null
   targetOwner?: number | null
+  completion?: ScriptReportCompletion
 }): ScriptReportBinding {
   return insertScriptReportBinding({
     binding_id: input.bindingId,
@@ -63,6 +65,7 @@ export function beginScriptReportBinding(input: {
     wrapper_script: input.wrapperScript,
     trusted_epoch: input.trustedEpoch ?? null,
     target_owner: input.targetOwner ?? null,
+    completion: input.completion,
   })
 }
 
@@ -107,8 +110,8 @@ export function findScriptReportBinding(bindingId: string): ScriptReportBinding 
 export interface ScriptReportBindingHealth extends ScriptReportBinding {
   identity_kind: 'wrapper_invocation'
   imported: ReturnType<typeof countScriptReportInvocations>
-  /** Started without a final report: still running, or killed. The outcome is unknown. */
-  incomplete: Array<{ invocation_id: string; started_at: number | null }>
+  /** Started without a final report: still running, killed, or handed to a detached worker. The outcome is unknown. */
+  incomplete: Array<{ invocation_id: string; started_at: number | null; handed_off?: boolean }>
 }
 
 export function listScriptReportBindingHealth(profile: string): ScriptReportBindingHealth[] {
