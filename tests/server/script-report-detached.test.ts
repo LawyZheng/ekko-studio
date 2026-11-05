@@ -119,7 +119,8 @@ const idle = () => until(() => !existsSync(join(state, 'lock')), 'worker exit')
 describe('detached script report completion', { timeout: 30_000 }, () => {
   it('a silent launcher exit is a handoff; the detached worker delivers the report and receives its receipt', async () => {
     const binding = bind('launcher.sh')
-    const launch = fire(binding, { SYNTHETIC_REPORT_HOLD: '0.5' })
+    const gate = join(root, 'release-1')
+    const launch = fire(binding, { SYNTHETIC_REPORT_GATE: gate })
     expect(launch).toMatchObject({ status: 0, stdout: '', stderr: '' })
     const [invocation] = spool(binding)
     const dir = join(spoolDir(binding), invocation)
@@ -129,6 +130,7 @@ describe('detached script report completion', { timeout: 30_000 }, () => {
     expect(existsSync(join(dir, 'final.json'))).toBe(false)
     expect(m.importer.importScriptReports().processed).toBe(0)
     expect(m.importer.incompleteScriptReports(binding)).toEqual([expect.objectContaining({ invocation_id: invocation, handed_off: true })])
+    writeFileSync(gate, '')
 
     await until(() => existsSync(join(dir, 'final.json')), 'worker completion')
     await idle()
@@ -179,6 +181,35 @@ describe('detached script report completion', { timeout: 30_000 }, () => {
     expect(helper(binding, ['receipt', '--event-id', 'e-1'])).toMatchObject({ status: 0, json: { status: 'accepted', invocation_id: original,
       receipt: { exact: true, event_id: 'e-1', invocation_id: original } } })
     expect(notices().filter(row => row.disposition === 'notified').map(row => [row.payload.invocation_id, row.payload.content])).toEqual([[original, 'report body\n']])
+  })
+
+  it('a conflicting resubmission never consumes the original invocation; a pending draft keeps its own event', async () => {
+    const binding = bind('launcher.sh')
+    const original = reserve(binding)
+    const crash = spawnSync(PYTHON, ['-c', [
+      'import importlib.util, os, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'w._status = lambda *a, **k: os._exit(9)',
+      'sys.exit(w.helper(["complete", "--event-id", "e-5", "--content-file", "-"]))',
+    ].join('\n')], { input: 'original', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: original } })
+    expect(crash.status).toBe(9)
+    const same = { EKKO_SCRIPT_REPORT_INVOCATION: original }
+    expect(helper(binding, ['complete', '--event-id', 'e-5', '--content-file', '-'], 'tampered', same)).toMatchObject({ status: 5, json: { status: 'conflict' } })
+    expect(existsSync(finalOf(binding, original))).toBe(false)
+    expect(helper(binding, ['complete', '--event-id', 'e-5', '--content-file', '-'], 'original', same)).toMatchObject({ status: 3 })
+    m.importer.importScriptReports()
+    expect(helper(binding, ['receipt', '--event-id', 'e-5']).json).toMatchObject({ status: 'accepted', receipt: { invocation_id: original, exact: true } })
+    // Day 1 stays pending (Studio does not import); the next day's run resubmits day 1, not a new day.
+    const worker = bind('launcher.sh')
+    fire(worker, { SYNTHETIC_REPORT_DAY: '2026-11-04' })
+    await idle()
+    fire(worker, { SYNTHETIC_REPORT_DAY: '2026-11-05' })
+    await idle()
+    m.importer.importScriptReports()
+    const days = notices().filter(row => row.payload.binding_id === worker.binding_id).map(row => [row.disposition, row.payload.event_id]).sort()
+    expect(days).toEqual([['notified', 'synthetic-daily-report:v1:2026-11-04'], ['silent', 'synthetic-daily-report:v1:2026-11-04']])
+    expect(readFileSync(join(state, 'compositions'), 'utf8')).toBe('2026-11-04\n')
   })
 
   it('refuses different bytes under an accepted event, unreserved invocations and sync bindings', async () => {
@@ -267,11 +298,14 @@ describe('detached script report completion', { timeout: 30_000 }, () => {
     rmSync(join(state, 'runs'))
     m.importer.importScriptReports()
     expect(notices().map(row => row.payload.outcome)).toEqual(['failed'])
+    // The first worker is held until all three launchers have exited, so the overlap is certain.
+    const gate = join(root, 'release-2')
     const launches = await Promise.all([0, 1, 2].map(() => new Promise<number>(done => {
-      const child = spawn(PYTHON, [wrapperOf(binding)], { env: { ...process.env, SYNTHETIC_REPORT_STATE: state, SYNTHETIC_REPORT_DAY: '2026-11-05', SYNTHETIC_REPORT_HOLD: '1' } })
+      const child = spawn(PYTHON, [wrapperOf(binding)], { env: { ...process.env, SYNTHETIC_REPORT_STATE: state, SYNTHETIC_REPORT_DAY: '2026-11-05', SYNTHETIC_REPORT_GATE: gate } })
       child.on('exit', code => done(code ?? -1))
     })))
     expect(launches).toEqual([0, 0, 0])
+    writeFileSync(gate, '')
     await until(() => spool(binding).every((id: string) => existsSync(finalOf(binding, id))), 'all invocations completed')
     await idle()
     m.importer.importScriptReports()

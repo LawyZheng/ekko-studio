@@ -299,7 +299,8 @@ detached worker (inherits EKKO_SCRIPT_REPORT_*) -> python <wrapper> complete --e
   owner, session generation, native job configuration), and a rejection is recorded in the receipt,
   never rerouted. The trust boundary is unchanged: any process of the same OS user can call the
   helper or write these files; this is not an attestation of which executable produced a report.
-- **Worker recipe.** Persist the draft first, submit it, and commit only on a matching receipt
+- **Worker recipe.** Persist the draft and its event id first (a later retry, even on another day,
+  resubmits that pair), submit it, and commit only on a matching receipt
   (`tests/server/fixtures/detached-report/` is a complete launcher and worker):
 
   ```bash

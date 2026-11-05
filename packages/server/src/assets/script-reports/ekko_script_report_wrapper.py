@@ -280,7 +280,8 @@ def serialize(record: dict) -> bytes:
 
 
 def publish_json(directory: str, name: str, record: dict) -> None:
-    """Exclusive temp file, fsync, atomic rename, directory fsync. Never overwrites."""
+    """Exclusive temp file, fsync, atomic no-replace link, directory fsync. Never overwrites, so two
+    publishers of one record (a detached launcher and its worker) cannot replace each other."""
     data = serialize(record)
     final = os.path.join(directory, name)
     temp = os.path.join(directory, f".{name}.{uuid.uuid4().hex}.tmp")
@@ -294,15 +295,12 @@ def publish_json(directory: str, name: str, record: dict) -> None:
     finally:
         os.close(fd)
     try:
-        if os.path.lexists(final):
-            raise FileExistsError(final)
-        os.rename(temp, final)
-    except BaseException:
+        os.link(temp, final)  # fails with FileExistsError when the record already exists
+    finally:
         try:
             os.unlink(temp)
         except OSError:
             pass
-        raise
     _fsync_dir(directory)
 
 
@@ -667,6 +665,10 @@ def _status(manifest: dict, envelope: dict, publish: bool) -> tuple[str, dict | 
     original = envelope["invocation_id"]
     receipt = _receipt(manifest, original)
     if receipt is not None:
+        # The original invocation may have been settled by something else (a failed launcher): only a
+        # receipt of this envelope's event and bytes says anything about this delivery.
+        if receipt.get("event_id") != envelope["event_id"] or receipt.get("submitted_sha256") != envelope["submitted_sha256"]:
+            return "unknown", receipt
         return receipt.get("state", "unknown"), receipt
     if os.path.lexists(os.path.join(manifest["spool_dir"], original, "final.json")):
         return "queued", None
@@ -750,7 +752,8 @@ def complete(manifest: dict, args) -> dict:
             # Durable before the report exists: a crash after this line retries the same identity and bytes.
             publish_json(manifest["outbox_dir"], os.path.basename(path), envelope)
         elif envelope["submitted_sha256"] != submitted or envelope["outcome"] != args.outcome:
-            if vehicle is not None:
+            # Never on the envelope's own invocation: it stays reserved for the original bytes.
+            if vehicle is not None and current != envelope["invocation_id"]:
                 detail = (f"Report event {event_id} was already submitted with different content "
                           f"(invocation {envelope['invocation_id']}); this submission was refused.")
                 _complete_invocation(manifest, current, vehicle, "failed", render_body(detail, None), event_id, submitted)

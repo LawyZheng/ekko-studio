@@ -1,9 +1,9 @@
 """Synthetic detached report worker (public test fixture) for Ekko detached completion.
 
-Composes the day's report at most once, persists the draft as its pending delivery BEFORE
-submitting, and commits business state only after Studio's receipt for the original invocation.
-An ambiguous result keeps the pending draft; the next run resubmits the identical bytes under the
-same event id. Slack-style links in the draft are converted to Markdown deterministically.
+Composes the day's report at most once, persists the draft and its event id as the pending delivery
+BEFORE submitting, and commits business state only after Studio's receipt for the original
+invocation. An ambiguous result keeps the pending draft; a later run (even on another day)
+resubmits the identical bytes under the event id stored with them. Slack-style links in the draft are converted to Markdown deterministically.
 """
 import datetime
 import json
@@ -23,6 +23,7 @@ day = (os.environ.get("SYNTHETIC_REPORT_DAY") or (open(day_file).read().strip() 
        or datetime.date.today().isoformat())
 event = f"synthetic-daily-report:v1:{day}"
 pending = os.path.join(state, "pending.md")
+pending_event = os.path.join(state, "pending.event")
 ledger = os.path.join(state, "delivered.json")
 
 
@@ -47,19 +48,28 @@ def compose() -> str:
     return slack_links_to_markdown(draft)
 
 
+def persist(path: str, text: str) -> None:
+    with open(path + ".tmp", "w") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.rename(path + ".tmp", path)
+
+
 def main() -> int:
-    hold = float(os.environ.get("SYNTHETIC_REPORT_HOLD") or 0)
-    if hold:
-        time.sleep(hold)
+    global event
+    gate = os.environ.get("SYNTHETIC_REPORT_GATE")
+    for _ in range(600):  # tests release the worker explicitly instead of racing it
+        if not gate or os.path.exists(gate):
+            break
+        time.sleep(0.05)
     delivered = json.load(open(ledger)) if os.path.exists(ledger) else {}
+    if os.path.exists(pending):
+        event = open(pending_event).read().strip()  # the pending draft keeps its own event
     nothing_new = event in delivered and not os.path.exists(pending)
     if not nothing_new and not os.path.exists(pending):
-        temp = pending + ".tmp"
-        with open(temp, "w") as handle:
-            handle.write(compose())
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.rename(temp, pending)
+        persist(pending_event, event)
+        persist(pending, compose())
     helper = os.environ.get("EKKO_SCRIPT_REPORT_HELPER")
     if not helper:
         print("no Ekko completion context; draft stays pending")
@@ -81,6 +91,7 @@ def main() -> int:
             json.dump(delivered, handle)
         os.rename(ledger + ".tmp", ledger)
         os.unlink(pending)
+        os.unlink(pending_event)
     return 0
 
 
