@@ -800,9 +800,11 @@ def helper(argv: list[str]) -> int:
         deadline = time.monotonic() + max(0.0, min(args.wait, WAIT_LIMIT_SECONDS))
         while result["status"] in ("queued", "incomplete") and result["invocation_id"] and time.monotonic() < deadline:
             time.sleep(0.5)
-            found = _receipt(manifest, result["invocation_id"])
-            if found is not None:
-                result.update(status=found.get("state", "unknown"), receipt=found)
+            # The same envelope match as the first answer: a receipt of another event or other bytes
+            # for that invocation (a failed launcher) never confirms this delivery.
+            envelope = _load_envelope(manifest, _envelope_path(manifest, result["event_id"]), result["event_id"])
+            status, found = _status(manifest, envelope, publish=False) if envelope else ("unknown", None)
+            result.update(status=status, receipt=found)
     except (HelperError, PreflightError, OSError) as exc:
         code = exc.code if isinstance(exc, HelperError) else type(exc).__name__
         sys.stdout.write(json.dumps({"status": "error", "error": code}) + "\n")

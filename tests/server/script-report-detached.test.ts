@@ -200,6 +200,34 @@ describe('detached script report completion', { timeout: 30_000 }, () => {
     expect(helper(binding, ['complete', '--event-id', 'e-5', '--content-file', '-'], 'original', same)).toMatchObject({ status: 3 })
     m.importer.importScriptReports()
     expect(helper(binding, ['receipt', '--event-id', 'e-5']).json).toMatchObject({ status: 'accepted', receipt: { invocation_id: original, exact: true } })
+    // The launcher settled the original invocation as a failure: a waiting retry must not confirm the event.
+    const taken = reserve(binding)
+    spawnSync(PYTHON, ['-c', [
+      'import importlib.util, os, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'w._status = lambda *a, **k: os._exit(9)',
+      'sys.exit(w.helper(["complete", "--event-id", "e-6", "--content-file", "-"]))',
+    ].join('\n')], { input: 'lost', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: taken } })
+    spawnSync(PYTHON, ['-c', [
+      'import importlib.util, time',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'm = w.load_manifest(w.MANIFEST_PATH)',
+      `w.publish_json(m["spool_dir"] + "/${taken}", "final.json", w.build_final(m, "${taken}", time.time(), time.monotonic(), {"outcome": "failed", "exit_code": 3, "detail": "launcher failed"}, True))`,
+    ].join('\n')], { encoding: 'utf8' })
+    const waiting = new Promise<{ status: number | null; out: string }>(done => {
+      const child = spawn(PYTHON, [wrapperOf(binding), 'complete', '--event-id', 'e-6', '--content-file', '-', '--wait', '20'])
+      let out = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      child.on('exit', status => done({ status, out }))
+      child.stdin.end('lost')
+    })
+    await sleep(1000)
+    m.importer.importScriptReports()
+    const answer = await waiting
+    expect(answer.status).toBe(6)
+    expect(JSON.parse(answer.out)).toMatchObject({ status: 'unknown', invocation_id: taken, receipt: { outcome: 'failed', event_id: null } })
     // Day 1 stays pending (Studio does not import); the next day's run resubmits day 1, not a new day.
     const worker = bind('launcher.sh')
     fire(worker, { SYNTHETIC_REPORT_DAY: '2026-11-04' })
