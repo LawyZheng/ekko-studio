@@ -1120,6 +1120,8 @@ export default {
       digest: "SHA-256 del script",
       workdir: "Directorio de trabajo",
       interpreter: "Intérprete",
+      completion: "Finalización",
+      completionDetached: "Proceso separado; la salida del lanzador no es el resultado",
       prompt: "Prompt de la tarea",
       afterApproval: "Tras la aprobación",
       resumes: "Se ejecuta según su programación",

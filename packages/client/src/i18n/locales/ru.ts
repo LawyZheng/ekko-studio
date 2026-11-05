@@ -1047,6 +1047,8 @@ export default {
       digest: "SHA-256 скрипта",
       workdir: "Рабочий каталог",
       interpreter: "Интерпретатор",
+      completion: "Завершение",
+      completionDetached: "Отдельный рабочий процесс; выход запускающего скрипта — не результат",
       prompt: "Промпт задания",
       afterApproval: "После одобрения",
       resumes: "Выполняется по расписанию",

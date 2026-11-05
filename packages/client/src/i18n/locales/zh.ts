@@ -1141,6 +1141,8 @@ export default {
       digest: "脚本 SHA-256",
       workdir: "工作目录",
       interpreter: "解释器",
+      completion: "完成方式",
+      completionDetached: "由分离的后台进程提交；启动器退出不代表结果",
       prompt: "任务提示词",
       afterApproval: "批准后",
       resumes: "按时间表运行",

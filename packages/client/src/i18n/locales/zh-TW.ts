@@ -1134,6 +1134,8 @@ export default {
       digest: "腳本 SHA-256",
       workdir: "工作目錄",
       interpreter: "直譯器",
+      completion: "完成方式",
+      completionDetached: "由分離的背景程序提交；啟動器結束不代表結果",
       prompt: "任務提示詞",
       afterApproval: "核准後",
       resumes: "依排程執行",

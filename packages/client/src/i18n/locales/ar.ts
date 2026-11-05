@@ -1134,6 +1134,8 @@ export default {
       digest: "SHA-256 للبرنامج النصي",
       workdir: "دليل العمل",
       interpreter: "المفسّر",
+      completion: "الإكمال",
+      completionDetached: "عامل منفصل؛ خروج المُشغِّل ليس النتيجة",
       prompt: "موجّه المهمة",
       afterApproval: "بعد الموافقة",
       resumes: "تعمل وفق جدولها",

@@ -1120,6 +1120,8 @@ export default {
       digest: "スクリプト SHA-256",
       workdir: "作業ディレクトリ",
       interpreter: "インタープリター",
+      completion: "完了方式",
+      completionDetached: "切り離されたワーカーが完了を送信します。ランチャーの終了は結果ではありません",
       prompt: "ジョブのプロンプト",
       afterApproval: "承認後",
       resumes: "スケジュールどおり実行",

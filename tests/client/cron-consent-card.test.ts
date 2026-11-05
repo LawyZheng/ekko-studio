@@ -70,6 +70,15 @@ describe('CronConsentCard', () => {
     expect(wrapper.find('[data-testid="cron-consent-outcome"]').text()).toContain('chat.cronConsent.approved')
   })
 
+  it('shows an opt-in detached completion before approval and nothing for the default', async () => {
+    api.listCronConsents.mockResolvedValue([makeRequest({ completion: 'detached' }), makeRequest({ id: 'req-2', completion: 'sync' })])
+    const wrapper = mount(CronConsentCard, { props: { sessionId: 'chat-1', profile: 'default' } })
+    await flushPromises()
+    const [detached, sync] = wrapper.findAll('[data-testid="cron-consent-request"]')
+    expect(detached.text()).toContain('chat.cronConsent.completionDetached')
+    expect(sync.text()).not.toContain('chat.cronConsent.completion')
+  })
+
   it('names a different target session by title, stable id and profile; a same-session request shows no target', async () => {
     api.listCronConsents.mockResolvedValue([
       makeRequest({ id: 'req-x', target: { session_id: 'chat-9', profile: 'default', title: 'Weekly <i>notes</i>' } }),

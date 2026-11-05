@@ -282,13 +282,13 @@ function freezeOperation(profile: string, input: Record<string, unknown>): { ope
   if (kind === 'script_report_enrollment') {
     const mode = input.mode === undefined ? 'new' : input.mode
     if (mode === 'existing') {
-      const plan = prepareAdoption(profile, String(input.job_id ?? ''))
+      const plan = prepareAdoption(profile, String(input.job_id ?? ''), input.completion)
       return {
         operation: { kind, plan },
         display: {
           kind, mode, action: 'modify_job', job_id: plan.jobId, name: plan.name, schedule: plan.schedule,
           script: plan.target.relative, script_kind: plan.target.kind, script_sha256: plan.target.sha256,
-          workdir: plan.workdir, interpreter: plan.interpreter, resume: plan.resume,
+          workdir: plan.workdir, interpreter: plan.interpreter, resume: plan.resume, completion: plan.completion,
         },
       }
     }
@@ -296,14 +296,14 @@ function freezeOperation(profile: string, input: Record<string, unknown>): { ope
     const plan = prepareNewEnrollment({
       profile, name: String(input.name ?? ''), schedule: String(input.schedule ?? ''), script: String(input.script ?? ''),
       workdir: input.workdir as string | null | undefined, interpreter: input.interpreter as string | null | undefined,
-      paused: input.paused === true,
+      paused: input.paused === true, completion: input.completion,
     })
     return {
       operation: { kind, plan },
       display: {
         kind, mode, action: 'create_job', name: plan.name, schedule: plan.schedule,
         script: plan.target.relative, script_kind: plan.target.kind, script_sha256: plan.target.sha256,
-        workdir: plan.workdir, interpreter: plan.interpreter, resume: !plan.paused,
+        workdir: plan.workdir, interpreter: plan.interpreter, resume: !plan.paused, completion: plan.completion,
       },
     }
   }

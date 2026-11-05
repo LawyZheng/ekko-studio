@@ -1141,6 +1141,8 @@ export default {
       digest: "Script SHA-256",
       workdir: "Working directory",
       interpreter: "Interpreter",
+      completion: "Completion",
+      completionDetached: "Detached worker; the launcher exit is not the result",
       prompt: "Job prompt",
       afterApproval: "After approval",
       resumes: "Runs on its schedule",
