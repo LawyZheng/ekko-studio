@@ -219,11 +219,16 @@ generation:
 
 | Wrapper outcome | Disposition | Shown |
 | --- | --- | --- |
-| `output` | `notified` | yes, plain text, with attention |
+| `output` | `notified` | yes, as Markdown, with attention |
 | `failed`, `launch_failed` | `notified` (failure title, sanitized diagnostic) | yes |
 | `silent` | `silent` | no, and no attention |
 | `interrupted` (the wrapper was signalled) | `unknown` | yes |
 | `output_unavailable` | `status_only` | yes |
+
+The chat bubble renders the stored body with the same Markdown renderer as agent-backed cron
+results (GFM tables, lists, links, code), so a plain multiline log keeps its line breaks. Raw HTML
+is escaped and the renderer runs in passive mode: images are not loaded, Mermaid fences show as
+code without rendering, and `data:` and other unsafe link schemes stay inert. Copy returns the raw body.
 
 Studio sanitizes the body again on import. A report is dropped, never rerouted, when the binding is
 revoked, the account is inactive or lost profile access, the session was reset or recreated, or the

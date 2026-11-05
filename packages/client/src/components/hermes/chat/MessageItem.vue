@@ -70,8 +70,9 @@ const externalLink = computed(() => {
   return url && /^https?:\/\//i.test(url) ? url : null;
 });
 
-// Script output is untrusted data too: plain text, never Markdown.
-const plainNotice = computed(() => externalNotice.value || props.message.studioNotice?.kind === "script_report");
+const plainNotice = computed(() => !!externalNotice.value);
+// Script output uses the chat Markdown renderer in passive mode (see MarkdownRenderer `passive`).
+const scriptReportNotice = computed(() => props.message.studioNotice?.kind === "script_report");
 
 const studioNoticeTitle = computed(() => {
   const notice = props.message.studioNotice;
@@ -1276,6 +1277,7 @@ onBeforeUnmount(() => {
             <MarkdownRenderer
               v-if="message.role === 'system' && message.content && !isCommandMessage && !plainNotice"
               :content="message.content"
+              :passive="scriptReportNotice"
             />
             <div v-if="isStatusCommand" class="command-result command-status">
               <span class="command-result-icon">/</span>

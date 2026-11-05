@@ -89,7 +89,9 @@ test('renders an external notice as inert plain text with a click-only link', as
   expect(remote).toEqual([])
 })
 
-test('renders a script invocation report as plain text with its wrapper provenance', async ({ page }) => {
+test('renders a script invocation report as Markdown with its wrapper provenance', async ({ page }) => {
+  const remote: string[] = []
+  page.on('request', request => { if (request.url().includes('external.example')) remote.push(request.url()) })
   await authenticate(page)
   await mockHermesApi(page)
   await mockChatSocket(page)
@@ -97,7 +99,15 @@ test('renders a script invocation report as plain text with its wrapper provenan
   await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Watch the digest')
   await page.getByRole('button', { name: 'Send' }).click()
   await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
-  const content = '**3 new items** <b>raw</b>'
+  const content = [
+    '**3 new items** <b>raw</b>',
+    '',
+    '| Item | Link |',
+    '| --- | --- |',
+    '| First | [#1](https://example.invalid/items/1) |',
+    '',
+    '![pixel](https://external.example/pixel.png)',
+  ].join('\n')
   await page.evaluate(content => {
     const state = (window as any).__PW_CHAT_SOCKET__
     const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
@@ -117,6 +127,72 @@ test('renders a script invocation report as plain text with its wrapper provenan
   const header = page.locator('.studio-notice-header').filter({ hasText: 'Daily digest' })
   await expect(header.locator('.studio-notice-title')).toHaveText('Script “Daily digest” reported')
   await expect(header.locator('.studio-notice-detail')).toContainText('not a native Hermes execution receipt')
-  await expect(page.locator('.studio-notice-text')).toHaveText(content)
-  await expect(page.locator('.markdown-body strong')).toHaveCount(0)
+  const body = page.locator('.markdown-body').filter({ hasText: '3 new items' })
+  await expect(body.locator('strong')).toHaveText('3 new items')
+  await expect(body).toContainText('<b>raw</b>')
+  await expect(body.locator('table th')).toHaveText(['Item', 'Link'])
+  await expect(body.getByRole('link', { name: '#1' })).toHaveAttribute('href', 'https://example.invalid/items/1')
+  await expect(page.locator('.studio-notice-text, .markdown-body b, img[src*="external.example"]')).toHaveCount(0)
+  expect(remote).toEqual([])
+})
+
+test('never renders Mermaid or data links from a script report', async ({ page }) => {
+  // Every request to the test host is recorded and aborted, so nothing leaves the browser.
+  const attempted: string[] = []
+  page.on('request', request => { if (new URL(request.url()).hostname === 'external.example') attempted.push(request.url()) })
+  await page.route(url => url.hostname === 'external.example', route => route.abort())
+  await authenticate(page)
+  await mockHermesApi(page)
+  await mockChatSocket(page)
+  await page.goto('/#/hermes/chat')
+  await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Watch the digest')
+  await page.getByRole('button', { name: 'Send' }).click()
+  await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
+  const report = [
+    '### Summary',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  P@{ img: "https://external.example/pixel.png", label: "pixel", h: 32 }',
+    '```',
+    '',
+    '[png](data:image/png;base64,AAAA) [web](https://example.invalid/ok)',
+  ].join('\n')
+  // An agent-backed result with a plain diagram marks when Mermaid rendering has finished.
+  const control = ['```mermaid', 'flowchart LR', '  A --> B', '```'].join('\n')
+  await page.evaluate(({ report, control }) => {
+    const state = (window as any).__PW_CHAT_SOCKET__
+    const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
+    state.latest.__trigger('run.started', { event: 'run.started', session_id: sid, run_id: 'script-run' })
+    state.latest.__trigger('run.completed', { event: 'run.completed', session_id: sid, run_id: 'script-run', output: 'Watching.' })
+    const now = Math.floor(Date.now() / 1000)
+    state.latest.__trigger('session.notice', {
+      event: 'session.notice', session_id: sid, attention: true,
+      message: {
+        id: 'studio-notice-5', session_id: sid, role: 'system', display_role: 'system', content: report, timestamp: now + 1,
+        studio_notice: { kind: 'script_report', notification_id: 5, disposition: 'notified', identity_kind: 'wrapper_invocation',
+          job_id: 'job5', job_name: 'Diagram digest', invocation_id: '00000000-0000-4000-8000-000000000005', outcome: 'output',
+          exit_code: 0, signal: null, reason: null, truncated: false },
+      },
+    })
+    state.latest.__trigger('session.notice', {
+      event: 'session.notice', session_id: sid, attention: true,
+      message: {
+        id: 'studio-notice-6', session_id: sid, role: 'system', display_role: 'system', content: control, timestamp: now + 2,
+        studio_notice: { kind: 'cron', notification_id: 6, disposition: 'notified', job_id: 'job-6', job_name: 'Agent diagram',
+          execution_id: 'exec-6', status: 'completed', success: true, reason: null, error: null, truncated: false, finished_at: null },
+      },
+    })
+  }, { report, control })
+  const agent = page.locator('.message-bubble').filter({ hasText: 'Agent diagram' })
+  await expect(agent.locator('.mermaid-diagram svg')).toBeVisible({ timeout: 20_000 })
+  await page.waitForTimeout(1000)
+  expect(attempted).toEqual([])
+  const body = page.locator('.markdown-body').filter({ hasText: 'Summary' })
+  await expect(body.locator('h3')).toHaveText('Summary')
+  await expect(body.locator('pre code')).toContainText('img: "https://external.example/pixel.png"')
+  await expect(body.locator('.mermaid-diagram, img, svg')).toHaveCount(0)
+  await expect(body.locator('a')).toHaveCount(1)
+  await expect(body.getByRole('link', { name: 'web' })).toHaveAttribute('href', 'https://example.invalid/ok')
+  expect(attempted).toEqual([])
 })
