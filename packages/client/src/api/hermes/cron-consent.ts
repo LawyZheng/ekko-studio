@@ -22,6 +22,8 @@ export interface CronConsentRequest {
   workdir?: string | null
   interpreter?: string | null
   resume?: boolean
+  /** Script reports: `detached` when a launcher hands each invocation to a worker that completes it. */
+  completion?: 'sync' | 'detached'
   prompt?: string
   prompt_truncated?: boolean
   prior_binding?: { session_id: string; session_title: string | null } | null

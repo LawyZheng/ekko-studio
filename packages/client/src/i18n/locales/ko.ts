@@ -1119,6 +1119,8 @@ export default {
       digest: "스크립트 SHA-256",
       workdir: "작업 디렉터리",
       interpreter: "인터프리터",
+      completion: "완료 방식",
+      completionDetached: "분리된 작업자가 완료를 제출합니다. 런처 종료는 결과가 아닙니다",
       prompt: "작업 프롬프트",
       afterApproval: "승인 후",
       resumes: "일정대로 실행",

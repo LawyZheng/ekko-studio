@@ -58,7 +58,7 @@ export async function enroll(ctx: Context) {
       userId: user.id, profile, sessionId, expectedGeneration: generation,
       name: String(input.name ?? ''), schedule: String(input.schedule ?? ''), script: String(input.script ?? ''),
       workdir: input.workdir as string | null | undefined, interpreter: input.interpreter as string | null | undefined,
-      paused: input.paused === true,
+      paused: input.paused === true, completion: input.completion,
     })
     ctx.status = 201
     ctx.body = { binding: { ...result.binding, identity_kind: 'wrapper_invocation' }, job: result.job, resumed: result.resumed }

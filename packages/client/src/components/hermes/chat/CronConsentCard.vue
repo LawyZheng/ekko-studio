@@ -143,6 +143,10 @@ defineExpose({ prepare, refresh })
           <dt>{{ t('chat.cronConsent.interpreter') }}</dt>
           <dd><code>{{ item.interpreter }}</code></dd>
         </template>
+        <template v-if="item.completion === 'detached'">
+          <dt>{{ t('chat.cronConsent.completion') }}</dt>
+          <dd>{{ t('chat.cronConsent.completionDetached') }}</dd>
+        </template>
         <template v-if="item.prompt !== undefined">
           <dt>{{ t('chat.cronConsent.prompt') }}</dt>
           <dd><pre class="cron-consent__prompt">{{ item.prompt }}{{ item.prompt_truncated ? '…' : '' }}</pre></dd>

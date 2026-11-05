@@ -15,11 +15,14 @@ import {
   revokeScriptReportBinding,
   scriptReportBindingDir,
   scriptReportManifestPath,
+  scriptReportOutboxDir,
+  scriptReportReceiptsDir,
   scriptReportRevokedMarker,
   scriptReportSpoolDir,
   scriptReportsRoot,
   type DestinationVerdict,
   type ScriptReportBinding,
+  type ScriptReportCompletion,
 } from '../../../studio/public/script-reports'
 import { getHermesBaseDir, getProfileDir } from '../profiles/profile'
 import { getHermesBin } from '../runtime/path'
@@ -49,6 +52,7 @@ export interface EnrollmentRequest {
   workdir?: string | null
   interpreter?: string | null
   paused?: boolean
+  completion?: unknown
 }
 
 export type HermesCronRunner = (profile: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
@@ -123,6 +127,13 @@ export function resolveTargetScript(scriptsDir: string, script: string): { path:
   const kind = kindOf(path)
   if (!kind) throw new EnrollmentError(400, 'unsupported_script_type')
   return { path, relative: inside.split(sep).join('/'), kind }
+}
+
+/** Opt-in completion mode: absent means the default synchronous wrapper report. */
+export function parseCompletion(value: unknown): ScriptReportCompletion {
+  if (value === undefined || value === null || value === 'sync') return 'sync'
+  if (value === 'detached') return 'detached'
+  throw new EnrollmentError(400, 'invalid_completion')
 }
 
 function text(value: unknown, max: number, code: string): string {
@@ -253,6 +264,7 @@ export interface NewEnrollmentPlan {
   workdir: string | null
   interpreter: string | null
   paused: boolean
+  completion: ScriptReportCompletion
 }
 
 /** Where reports go. `recheck` adds caller policy (e.g. consent account) to the destination fence. */
@@ -277,7 +289,8 @@ export function prepareNewEnrollment(request: Omit<EnrollmentRequest, 'userId' |
   const workdir = optionalAbsolute(request.workdir, 'invalid_workdir', true)
   const interpreter = optionalAbsolute(request.interpreter, 'invalid_interpreter', false)
   if (interpreter && target.kind !== 'python') throw new EnrollmentError(400, 'invalid_interpreter')
-  return { mode: 'new', profile, name, schedule, target, workdir, interpreter, paused: request.paused === true }
+  const completion = parseCompletion(request.completion)
+  return { mode: 'new', profile, name, schedule, target, workdir, interpreter, paused: request.paused === true, completion }
 }
 
 function recheckDestination(destination: EnrollmentDestination, profile: string): void {
@@ -286,13 +299,15 @@ function recheckDestination(destination: EnrollmentDestination, profile: string)
   destination.recheck?.()
 }
 
-function writePrivateBindingFiles(bindingId: string, target: TargetPlan, cwd: string): string {
+function writePrivateBindingFiles(bindingId: string, target: TargetPlan, cwd: string, completion: ScriptReportCompletion): string {
   const manifestPath = scriptReportManifestPath(bindingId, 1)
   privateDir(scriptReportsRoot())
-  privateDir(dirname(scriptReportBindingDir(bindingId)))
-  privateDir(scriptReportBindingDir(bindingId))
-  privateDir(dirname(scriptReportSpoolDir(bindingId)))
-  privateDir(scriptReportSpoolDir(bindingId))
+  const dirs = [scriptReportBindingDir(bindingId), scriptReportSpoolDir(bindingId)]
+  if (completion === 'detached') dirs.push(scriptReportOutboxDir(bindingId), scriptReportReceiptsDir(bindingId))
+  for (const dir of dirs) {
+    privateDir(dirname(dir))
+    privateDir(dir)
+  }
   writeExclusive(manifestPath, `${JSON.stringify({
     schema_version: 1,
     binding_id: bindingId,
@@ -303,6 +318,9 @@ function writePrivateBindingFiles(bindingId: string, target: TargetPlan, cwd: st
     spool_dir: scriptReportSpoolDir(bindingId),
     revoked_marker: scriptReportRevokedMarker(bindingId),
     max_pending: MAX_PENDING,
+    ...(completion === 'detached' ? {
+      completion, outbox_dir: scriptReportOutboxDir(bindingId), receipts_dir: scriptReportReceiptsDir(bindingId),
+    } : {}),
   }, null, 2)}\n`, 0o600)
   return manifestPath
 }
@@ -339,16 +357,18 @@ async function executeNewLocked(bindingId: string, plan: NewEnrollmentPlan, dest
 
   const wrapperRelative = `${WRAPPER_DIR}/${bindingId}.py`
   const wrapperPath = join(home, 'scripts', WRAPPER_DIR, `${bindingId}.py`)
-  const manifestPath = writePrivateBindingFiles(bindingId, target, plan.workdir || dirname(target.path))
+  const manifestPath = writePrivateBindingFiles(bindingId, target, plan.workdir || dirname(target.path), plan.completion)
   const binding = beginScriptReportBinding({
     bindingId, userId: destination.userId, profile, sessionId: destination.sessionId, expectedGeneration: destination.expectedGeneration,
     jobName: plan.name, targetScript: target.relative, wrapperScript: wrapperRelative, trustedEpoch: destination.trustedEpoch,
-    targetOwner: destination.targetOwner,
+    targetOwner: destination.targetOwner, completion: plan.completion,
   })
   const discard = () => {
     rmSync(wrapperPath, { force: true })
     rmSync(scriptReportBindingDir(bindingId), { recursive: true, force: true })
     rmSync(scriptReportSpoolDir(bindingId), { recursive: true, force: true })
+    rmSync(scriptReportOutboxDir(bindingId), { recursive: true, force: true })
+    rmSync(scriptReportReceiptsDir(bindingId), { recursive: true, force: true })
   }
 
   // The job Hermes created from the approved plan, read before any managed mutation can reach it.
@@ -489,6 +509,7 @@ export interface AdoptionPlan {
   jobFingerprint: string
   /** The approved scheduling intent: enabled at consent time. Resumed only if so, and only if unchanged. */
   resume: boolean
+  completion: ScriptReportCompletion
 }
 
 function activeBindingForJob(profile: string, jobId: string): ScriptReportBinding | undefined {
@@ -496,7 +517,8 @@ function activeBindingForJob(profile: string, jobId: string): ScriptReportBindin
     .find(binding => binding.job_id === jobId && (binding.state === 'enrolling' || binding.state === 'active'))
 }
 
-export function prepareAdoption(profileInput: string, jobIdInput: string): AdoptionPlan {
+export function prepareAdoption(profileInput: string, jobIdInput: string, completionInput?: unknown): AdoptionPlan {
+  const completion = parseCompletion(completionInput)
   const profile = text(profileInput, 128, 'invalid_profile')
   const jobId = text(jobIdInput, 200, 'invalid_job')
   const home = profileHome(profile)
@@ -515,7 +537,7 @@ export function prepareAdoption(profileInput: string, jobIdInput: string): Adopt
     mode: 'existing', profile, jobId, name: String(job.name || jobId),
     schedule: String(job.schedule_display || job.schedule?.display || ''),
     target, workdir: typeof job.workdir === 'string' && job.workdir ? job.workdir : null, interpreter,
-    configuredScript: script, jobFingerprint: jobFingerprint(job), resume: job.enabled !== false,
+    configuredScript: script, jobFingerprint: jobFingerprint(job), resume: job.enabled !== false, completion,
   }
 }
 
@@ -599,11 +621,11 @@ export async function executeAdoption(plan: AdoptionPlan, destination: Enrollmen
 
     const wrapperRelative = `${WRAPPER_DIR}/${bindingId}.py`
     const wrapperPath = join(scriptsDir, WRAPPER_DIR, `${bindingId}.py`)
-    const manifestPath = writePrivateBindingFiles(bindingId, target, plan.workdir || dirname(target.path))
+    const manifestPath = writePrivateBindingFiles(bindingId, target, plan.workdir || dirname(target.path), plan.completion)
     beginScriptReportBinding({
       bindingId, userId: destination.userId, profile, sessionId: destination.sessionId, expectedGeneration: destination.expectedGeneration,
       jobName: plan.name, targetScript: target.relative, wrapperScript: wrapperRelative, trustedEpoch: destination.trustedEpoch,
-      targetOwner: destination.targetOwner,
+      targetOwner: destination.targetOwner, completion: plan.completion,
     })
     recordScriptReportJob(bindingId, jobId)
     const fail = (code: string, status = 502, message?: string): never => {
