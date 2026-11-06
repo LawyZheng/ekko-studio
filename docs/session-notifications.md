@@ -331,25 +331,34 @@ worker -> append --event-id E1 --event-kind start ... -> slot 1 of I -> importer
   numbered in admission order under the helper's lock; the ninth new event of one invocation is
   refused (`event_limit_reached`, exit 4) and nothing earlier is replaced. Budget your lifecycle
   messages within the bound; retries take no slot.
-- **Identity.** The frozen event record (sanitized body, submitted digest, invocation, slot, kind)
-  is written to `outbox/<binding>/events/<sha256(E)>.json` before it reaches the spool. The same `E`
+- **Identity.** Admission writes the frozen event record (sanitized body, submitted digest,
+  invocation, slot, kind) into its slot `outbox/<binding>/invocations/<I>/<NN>.json`, then a lookup
+  copy `outbox/<binding>/events/<sha256(E)>.json`, both before it reaches the spool; a crash in
+  between leaves a complete slot that closure delivers and a retry resumes. The same `E`
   with the same bytes and kind returns that record from any invocation (it never closes or uses the
   caller's invocation); other bytes or kind are a `conflict` (exit 5). Distinct events with the same
   text are distinct notices. Use one event id per business occurrence and stage, for example
   `daily-report:$DAY:start`.
 - **Order and closure.** Studio imports slot `n` only after slot `n-1` is settled, while the
   invocation still runs; its terminal report (and the spool cleanup) waits until every admitted
-  slot is settled. `complete`, and the wrapper's own failure report, first restore any admitted
+  slot is settled. The final report counts only if it existed before that pass scanned the slots,
+  and an unreadable `events/` directory holds it back. `complete`, and the wrapper's own failure report, first restore any admitted
   slot missing from the spool (a crash after its envelope). Only new events are refused after
   closure; a known event keeps answering with its receipt.
 - **Receipt.** `receipts/<binding>/events/<sha256(E)>.json` (`stream: "append"`): binding and
   revision, job, session and generation, invocation, event, kind, slot (`sequence`), `state`,
   reason, `notification_id`, `submitted_sha256`, `accepted_sha256`, `exact` and `record_sha256`.
   `receipt --stream append --event-id E` reads it; exit codes as above. Studio builds it from its
-  committed event row and stored notice, never from a replayed spool file: a replay with changed
-  bytes is quarantined and cannot inherit an earlier acceptance. The same fences apply as for the
+  committed event row and stored notice, never from a replayed spool file. The inbox key is the
+  slot (`script-report-event:[binding, revision, invocation, slot]`): a replay with changed bytes
+  or another event id is quarantined, and a notice committed just before a crash is recovered from
+  the inbox rather than accepted twice. The same fences apply as for the
   terminal report. The terminal invocation row, receipt and health counts are unchanged, and
   synchronous bindings cannot append.
+- **Downgrade.** A Studio release without this importer ignores `events/`: it imports the terminal
+  report and removes the invocation spool, so pending appended notices are lost and its terminal
+  receipt says nothing about them. Before downgrading, stop producers that append and wait until
+  every appended event has its receipt.
 
 ## Consent requests (model-initiated delivery)
 

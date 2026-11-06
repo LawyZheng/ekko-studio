@@ -809,17 +809,44 @@ def _slots_dir(manifest: dict, invocation_id: str) -> str:
     return os.path.join(manifest["outbox_dir"], "invocations", invocation_id)
 
 
+def _valid_append(manifest: dict, envelope, event_id: str | None) -> dict:
+    if not isinstance(envelope, dict) or envelope.get("schema_version") != SCHEMA_VERSION or envelope.get("phase") != "event" \
+            or envelope.get("binding_id") != manifest["binding_id"] or envelope.get("binding_revision") != manifest["binding_revision"] \
+            or not isinstance(envelope.get("event_id"), str) or event_id not in (None, envelope["event_id"]) \
+            or not UUID_RE.match(str(envelope.get("invocation_id"))) or envelope.get("event_kind") not in EVENT_KINDS \
+            or not isinstance(envelope.get("sequence"), int):
+        # Preserved as is: a malformed record is never replaced or guessed.
+        raise HelperError("envelope_invalid")
+    return envelope
+
+
 def _load_append(manifest: dict, event_id: str) -> dict | None:
     directory, name = _append_paths(manifest, event_id)
     envelope = _read_json(os.path.join(directory, name), 256 * 1024)
-    if envelope is None:
-        return None
-    if not isinstance(envelope, dict) or envelope.get("schema_version") != SCHEMA_VERSION or envelope.get("phase") != "event" \
-            or envelope.get("binding_id") != manifest["binding_id"] or envelope.get("binding_revision") != manifest["binding_revision"] \
-            or envelope.get("event_id") != event_id or not UUID_RE.match(str(envelope.get("invocation_id"))) \
-            or envelope.get("event_kind") not in EVENT_KINDS or not isinstance(envelope.get("sequence"), int):
+    return None if envelope is None else _valid_append(manifest, envelope, event_id)
+
+
+def _slot_records(manifest: dict, invocation_id: str) -> list[dict]:
+    """The frozen records admitted to an invocation, in slot order (at most APPEND_LIMIT)."""
+    slots = _slots_dir(manifest, invocation_id)
+    try:
+        names = sorted(name for name in os.listdir(slots) if not name.startswith("."))
+    except FileNotFoundError:
+        return []
+    records = [_valid_append(manifest, _read_json(os.path.join(slots, name), 256 * 1024), None) for name in names]
+    if any(record["invocation_id"] != invocation_id or name != f"{record['sequence']:02d}.json" for name, record in zip(names, records)):
         raise HelperError("envelope_invalid")
-    return envelope
+    return records
+
+
+def _index(manifest: dict, envelope: dict) -> None:
+    """The event's lookup copy of its slot record; never replaces an existing one."""
+    directory, name = _append_paths(manifest, envelope["event_id"])
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        publish_json(directory, name, envelope)
+    except FileExistsError:
+        pass
 
 
 def _deliver_event(manifest: dict, envelope: dict) -> None:
@@ -843,19 +870,9 @@ def _close_events(manifest: dict, invocation_id: str) -> None:
     """Before an invocation is finalized: every notice it admitted is in its spool (crash recovery)."""
     if manifest.get("completion") != "detached":
         return
-    slots = _slots_dir(manifest, invocation_id)
-    try:
-        names = sorted(name for name in os.listdir(slots) if not name.startswith("."))
-    except FileNotFoundError:
-        return
-    for name in names:
-        slot = _read_json(os.path.join(slots, name), 4096)
-        stored = _read_json(os.path.join(manifest["outbox_dir"], "events", f"{slot.get('event_sha256')}.json"), 256 * 1024) \
-            if isinstance(slot, dict) else None
-        # A slot whose envelope was never written was never admitted (its caller got no answer).
-        envelope = _load_append(manifest, stored.get("event_id")) if isinstance(stored, dict) else None
-        if envelope is not None and envelope["invocation_id"] == invocation_id:
-            _deliver_event(manifest, envelope)
+    for envelope in _slot_records(manifest, invocation_id):
+        _index(manifest, envelope)
+        _deliver_event(manifest, envelope)
 
 
 def _event_receipt(manifest: dict, event_id: str) -> dict | None:
@@ -891,28 +908,27 @@ def append(manifest: dict, args) -> dict:
                 raise HelperError("invocation_not_reserved" if current else "invocation_required")
             if os.path.lexists(os.path.join(manifest["spool_dir"], current, "final.json")):
                 raise HelperError("invocation_finalized")
-            slots = _slots_dir(manifest, current)
-            os.makedirs(slots, mode=0o700, exist_ok=True)
-            taken = sorted(name for name in os.listdir(slots) if not name.startswith("."))
-            # A slot taken before a crash (envelope not yet written) is resumed, never taken twice.
-            mine = [name for name in taken if (_read_json(os.path.join(slots, name), 4096) or {}).get("event_sha256") == _digest(event_id)]
+            records = _slot_records(manifest, current)
+            # A record admitted before a crash (its index not yet written) is resumed, never admitted twice.
+            mine = [record for record in records if record["event_id"] == event_id]
             if mine:
-                sequence = int(mine[0])
-            elif len(taken) >= APPEND_LIMIT:
+                envelope = mine[0]
+            elif len(records) >= APPEND_LIMIT:
                 raise HelperError("event_limit_reached", "rejected", HELPER_EXIT["rejected"])
             else:
-                sequence = len(taken) + 1
-                publish_json(slots, f"{sequence:02d}", {"event_sha256": _digest(event_id)})
-            envelope = fit_record({
-                "schema_version": SCHEMA_VERSION, "phase": "event", "binding_id": manifest["binding_id"],
-                "binding_revision": manifest["binding_revision"], "invocation_id": current, "event_id": event_id,
-                "event_kind": args.event_kind, "sequence": sequence, "submitted_sha256": submitted, "created_at": time.time(),
-                "wrapper_version": WRAPPER_VERSION, "sanitizer_version": SANITIZER_VERSION, **render_body(text, None)})
-            directory, name = _append_paths(manifest, event_id)
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            # Durable before the spool sees it: a crash after this line resumes this exact record.
-            publish_json(directory, name, envelope)
-        elif envelope["submitted_sha256"] != submitted or envelope["event_kind"] != args.event_kind:
+                envelope = fit_record({
+                    "schema_version": SCHEMA_VERSION, "phase": "event", "binding_id": manifest["binding_id"],
+                    "binding_revision": manifest["binding_revision"], "invocation_id": current, "event_id": event_id,
+                    "event_kind": args.event_kind, "sequence": len(records) + 1, "submitted_sha256": submitted,
+                    "created_at": time.time(), "wrapper_version": WRAPPER_VERSION, "sanitizer_version": SANITIZER_VERSION,
+                    **render_body(text, None)})
+                slots = _slots_dir(manifest, current)
+                os.makedirs(slots, mode=0o700, exist_ok=True)
+                # The admission point: the slot holds the frozen record itself, so a crash after this line
+                # leaves a complete record that closure delivers and a retry resumes; never an empty slot.
+                publish_json(slots, f"{envelope['sequence']:02d}.json", envelope)
+            _index(manifest, envelope)
+        if envelope["submitted_sha256"] != submitted or envelope["event_kind"] != args.event_kind:
             return {"status": "conflict", "event_id": event_id, "invocation_id": envelope["invocation_id"],
                     "sequence": envelope["sequence"], "receipt": None}
         _deliver_event(manifest, envelope)

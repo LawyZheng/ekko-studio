@@ -545,6 +545,85 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'never-appended'])).toMatchObject({ status: 6, json: { status: 'unknown', receipt: null } })
   })
 
+  it('a crash after a slot is taken, before its event index exists, blocks nothing: the slot keeps its record', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    // Crash point: the first durable write of `append` succeeds, the second never happens.
+    const crash = spawnSync(PYTHON, ['-c', [
+      'import importlib.util, os, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'original, calls = w.publish_json, []',
+      'def publish(*a, **k):',
+      '    calls.append(a[1])',
+      '    if len(calls) > 1: os._exit(9)',
+      '    return original(*a, **k)',
+      'w.publish_json = publish',
+      'sys.exit(w.helper(["append", "--event-id", "x:start", "--event-kind", "start", "--content-file", "-"]))',
+    ].join('\n')], { input: 'Job started', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: invocation } })
+    expect(crash.status).toBe(9)
+    expect(append(binding, invocation, 'x:body', 'body', 'body text')).toMatchObject({ status: 3, json: { sequence: 2 } })
+    expect(complete(binding, invocation, 'x:final', 'done')).toMatchObject({ status: 3 })
+    m.importer.importScriptReports()
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'Job started'], ['body', 'body text'], ['terminal', 'done']])
+    expect(spool(binding)).toEqual([])
+    // The interrupted caller's retry finds its original record and receipt.
+    expect(append(binding, invocation, 'x:start', 'start', 'Job started')).toMatchObject({ status: 0, json: { sequence: 1, status: 'accepted' } })
+  })
+
+  it('a replay that changes the event of a slot committed just before a crash never gets a second notice', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'y:start', 'start', 'Job started')
+    const file = join(spoolDir(binding), invocation, 'events', '01.json')
+    const original = JSON.parse(readFileSync(file, 'utf8'))
+    m.importer.importScriptReports()
+    const [first] = notices()
+    // Crash point: the notice is committed; the event row and its receipt are not.
+    m.db.prepare('DELETE FROM script_report_events WHERE binding_id=?').run(binding.binding_id)
+    rmSync(join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events'), { recursive: true, force: true })
+    writeFileSync(file, JSON.stringify({ ...original, event_id: 'y:other', content: 'forged' }), { mode: 0o600 })
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(1)
+    expect(eventReceipt(binding, 'y:start')).toMatchObject({ state: 'accepted', notification_id: first.id, sequence: 1, exact: true })
+    expect(eventReceipt(binding, 'y:other')).toBeNull()
+  })
+
+  it('an unreadable events directory holds the terminal report; an append racing the importer is never cleaned up unimported', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'z:start', 'start', 'Job started')
+    complete(binding, invocation, 'z:final', 'done')
+    const events = join(spoolDir(binding), invocation, 'events')
+    chmodSync(events, 0o000)
+    try {
+      m.importer.importScriptReports()
+    } finally {
+      chmodSync(events, 0o700)
+    }
+    expect(notices()).toHaveLength(0)
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'Job started'], ['terminal', 'done']])
+    // Deterministic interleaving: while the importer settles slot 1, the worker appends slot 2 and completes.
+    const other = reserve(binding)
+    append(binding, other, 'r:start', 'start', 'Run started')
+    let raced = false
+    m.importer.setScriptReportJobInspector((profile: string, jobId: string) => {
+      if (!raced) {
+        raced = true
+        append(binding, other, 'r:body', 'body', 'Run body')
+        complete(binding, other, 'r:final', 'Run done')
+      }
+      return m.jobs.readNativeJob(profile, jobId)
+    })
+    m.importer.importScriptReports()
+    m.importer.setScriptReportJobInspector(m.jobs.readNativeJob)
+    m.importer.importScriptReports()
+    expect(shown().slice(2)).toEqual([['start', 'Run started'], ['body', 'Run body'], ['terminal', 'Run done']])
+    expect(spool(binding)).toEqual([])
+  })
+
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
