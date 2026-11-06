@@ -7232,6 +7232,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "completion": {
+                    "type": "string"
+                  },
                   "interpreter": {
                     "type": "string"
                   },
@@ -7310,6 +7313,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "completion": {
+                    "type": "string"
+                  },
                   "interpreter": {
                     "type": "string"
                   },
