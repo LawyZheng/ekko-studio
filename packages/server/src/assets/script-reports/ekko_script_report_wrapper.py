@@ -887,13 +887,17 @@ def _deliver_event(manifest: dict, envelope: dict) -> None:
     if not os.path.isdir(directory):
         return
     events = os.path.join(directory, "events")
-    _durable_dir(events)
     name = f"{envelope['sequence']:02d}.json"
-    if not os.path.lexists(os.path.join(events, name)):
-        try:
+    try:
+        # Only beneath the existing reservation: Studio may remove the invocation at any moment, and
+        # recreating it would leave a phantom spool entry.
+        if not os.path.isdir(events):
+            os.mkdir(events, 0o700)
+            _fsync_dir(directory)
+        if not os.path.lexists(os.path.join(events, name)):
             publish_json(events, name, envelope)
-        except FileExistsError:
-            pass
+    except (FileExistsError, FileNotFoundError):
+        pass
 
 
 def _close_events(manifest: dict, invocation_id: str) -> None:

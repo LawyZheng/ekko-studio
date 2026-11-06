@@ -342,7 +342,8 @@ worker -> append --event-id E1 --event-kind start ... -> slot 1 of I -> importer
 - **Order and closure.** Studio imports slot `n` only after slot `n-1` is settled, while the
   invocation still runs; its terminal report (and the spool cleanup) waits until every admitted
   slot is settled. The final report counts only if it existed before that pass scanned the slots,
-  and an unreadable `events/` directory holds it back. `complete`, and the wrapper's own failure report (which leaves the invocation incomplete
+  and an unreadable admissions directory (`outbox/<binding>/invocations/<I>/`, not the spool's
+  `events/` copies) holds it back. `complete`, and the wrapper's own failure report (which leaves the invocation incomplete
   when it cannot take the helper's lock), first restore any admitted
   slot missing from the spool (a crash after its record). Only new events are refused after
   closure; a known event keeps answering with its receipt.

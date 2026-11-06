@@ -410,26 +410,26 @@ function acknowledgeEvent(binding: ScriptReportBinding, entry: ScriptReportEvent
   try {
     const dir = join(scriptReportReceiptsDir(binding.binding_id), 'events')
     const path = join(dir, eventReceiptName(entry.event_id))
-    const existing = readPrivateFile(path, 64 * 1024)
-    if (existing) {
-      let found: any = null
-      try { found = JSON.parse(existing.toString('utf8')) } catch { /* unreadable: not this row's receipt */ }
-      if (!found || found.binding_id !== binding.binding_id || found.event_id !== entry.event_id || found.invocation_id !== entry.invocation_id
-        || found.sequence !== entry.sequence || found.state !== entry.state || found.notification_id !== entry.notification_id
-        || found.record_sha256 !== entry.record_sha256) return false
-    } else {
-      const notice = entry.notification_id === null ? null : getSessionNotificationById(entry.notification_id)
-      const stored = entry.state === 'accepted' && typeof notice?.payload.content === 'string' ? notice.payload.content : null
-      const accepted = stored === null ? null : sha256(stored)
-      publishReceipt(dir, eventReceiptName(entry.event_id), {
-        schema_version: 1, stream: 'append', binding_id: binding.binding_id, binding_revision: entry.binding_revision, job_id: binding.job_id,
-        session_id: binding.session_id, session_generation: notice?.session_generation ?? binding.session_generation,
-        invocation_id: entry.invocation_id, event_id: entry.event_id, event_kind: entry.event_kind, sequence: entry.sequence,
-        state: entry.state, reason: entry.detail, notification_id: entry.notification_id, submitted_sha256: entry.submitted_sha256,
-        accepted_sha256: accepted, exact: accepted !== null && accepted === entry.submitted_sha256, record_sha256: entry.record_sha256,
-        settled_at: entry.updated_at,
-      })
+    const notice = entry.notification_id === null ? null : getSessionNotificationById(entry.notification_id)
+    const stored = entry.state === 'accepted' && typeof notice?.payload.content === 'string' ? notice.payload.content : null
+    const accepted = stored === null ? null : sha256(stored)
+    const expected: Record<string, unknown> = {
+      schema_version: 1, stream: 'append', binding_id: binding.binding_id, binding_revision: entry.binding_revision, job_id: binding.job_id,
+      session_id: binding.session_id, session_generation: notice?.session_generation ?? binding.session_generation,
+      invocation_id: entry.invocation_id, event_id: entry.event_id, event_kind: entry.event_kind, sequence: entry.sequence,
+      state: entry.state, reason: entry.detail, notification_id: entry.notification_id, submitted_sha256: entry.submitted_sha256,
+      accepted_sha256: accepted, exact: accepted !== null && accepted === entry.submitted_sha256, record_sha256: entry.record_sha256,
+      settled_at: entry.updated_at,
     }
+    let present = true
+    try { lstatSync(path) } catch { present = false }
+    if (!present) publishReceipt(dir, eventReceiptName(entry.event_id), expected)
+    // Whatever file won (ours, an earlier pass's, or another writer's) must be exactly the committed receipt.
+    const raw = readPrivateFile(path, 64 * 1024)
+    let found: any = null
+    try { found = raw ? JSON.parse(raw.toString('utf8')) : null } catch { /* unreadable: not the receipt */ }
+    if (!found || typeof found !== 'object' || Object.keys(found).length !== Object.keys(expected).length
+      || Object.entries(expected).some(([key, value]) => found[key] !== value)) return false
   } catch {
     return false // the disposition is durable: a later pass writes the same receipt
   }

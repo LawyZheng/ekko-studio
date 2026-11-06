@@ -793,6 +793,53 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(readdirSync(join(m.paths.scriptReportOutboxDir(binding.binding_id), 'invocations', invocation))).toEqual(['01.json'])
   })
 
+  it('every field of an existing receipt must equal the committed one, or the invocation is held', () => {
+    for (const change of [{ exact: false }, { accepted_sha256: sha('other') }, { job_id: 'other-job' }, { event_kind: 'failure' }]) {
+      const binding = bind('launcher.sh')
+      const invocation = reserve(binding)
+      append(binding, invocation, 'f:start', 'start', 'field check')
+      m.importer.importScriptReports()
+      const path = join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events', `${sha('f:start')}.json`)
+      writeFileSync(path, JSON.stringify({ ...eventReceipt(binding, 'f:start'), ...change }))
+      complete(binding, invocation, 'f:final', 'field done')
+      m.importer.importScriptReports()
+      expect(spool(binding), JSON.stringify(change)).toEqual([invocation])
+    }
+    // An unreadable receipt in place before settlement is not a receipt either.
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'u:start', 'start', 'unreadable')
+    mkdirSync(join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events', `${sha('u:start')}.json`), { recursive: true })
+    complete(binding, invocation, 'u:final', 'done')
+    m.importer.importScriptReports()
+    expect(spool(binding)).toEqual([invocation])
+  })
+
+  it('a retry racing terminal cleanup never recreates the removed invocation', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'g:start', 'start', 'race')
+    complete(binding, invocation, 'g:final', 'done')
+    m.importer.importScriptReports()
+    expect(spool(binding)).toEqual([])
+    // The retry saw no receipt and an existing invocation just before Studio's cleanup removed it.
+    const retry = spawnSync(PYTHON, ['-c', [
+      'import importlib.util, os, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'status, isdir = w._event_status, os.path.isdir',
+      'calls = []',
+      'def stale(manifest, envelope):',
+      '    calls.append(1)',
+      '    return ("queued", None) if len(calls) == 1 else status(manifest, envelope)',
+      'w._event_status = stale',
+      `os.path.isdir = lambda path: True if path.endswith(${JSON.stringify(invocation)}) else isdir(path)`,
+      'sys.exit(w.helper(["append", "--event-id", "g:start", "--event-kind", "start", "--content-file", "-"]))',
+    ].join('\n')], { input: 'race', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: invocation } })
+    expect(retry.status, retry.stdout + retry.stderr).toBe(0)
+    expect(existsSync(join(spoolDir(binding), invocation))).toBe(false)
+  })
+
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
