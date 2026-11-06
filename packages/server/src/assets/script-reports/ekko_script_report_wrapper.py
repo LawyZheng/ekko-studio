@@ -792,6 +792,18 @@ def complete(manifest: dict, args) -> dict:
 
 # --- appended notices ----------------------------------------------------------------------------
 
+def _durable_dir(path: str) -> None:
+    """Create missing directories (0700), fsyncing each parent so an acknowledged admission survives power loss."""
+    if os.path.isdir(path):
+        return
+    _durable_dir(os.path.dirname(path))
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        return
+    _fsync_dir(os.path.dirname(path))
+
+
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -859,7 +871,7 @@ def _finish_admission(manifest: dict) -> None:
 def _index(manifest: dict, envelope: dict) -> None:
     """The event's lookup copy of its slot record; never replaces an existing one."""
     directory, name = _append_paths(manifest, envelope["event_id"])
-    os.makedirs(directory, mode=0o700, exist_ok=True)
+    _durable_dir(directory)
     try:
         publish_json(directory, name, envelope)
     except FileExistsError:
@@ -868,13 +880,14 @@ def _index(manifest: dict, envelope: dict) -> None:
 
 def _deliver_event(manifest: dict, envelope: dict) -> None:
     """Publish the frozen record into its invocation's spool unless Studio already settled it."""
-    if _event_receipt(manifest, envelope["event_id"]) is not None:
+    status, receipt = _event_status(manifest, envelope)
+    if receipt is not None and status != "unknown":
         return
     directory = os.path.join(manifest["spool_dir"], envelope["invocation_id"])
     if not os.path.isdir(directory):
         return
     events = os.path.join(directory, "events")
-    os.makedirs(events, mode=0o700, exist_ok=True)
+    _durable_dir(events)
     name = f"{envelope['sequence']:02d}.json"
     if not os.path.lexists(os.path.join(events, name)):
         try:
@@ -914,8 +927,6 @@ def append(manifest: dict, args) -> dict:
     raw = _read_content(args.content_file)
     submitted = hashlib.sha256(raw).hexdigest()
     text = raw.decode("utf-8", errors="replace")
-    if not text.strip():
-        raise HelperError("empty_content")
     current = args.invocation or os.environ.get("EKKO_SCRIPT_REPORT_INVOCATION") or None
     lock = _locked(manifest)
     try:
@@ -926,8 +937,11 @@ def append(manifest: dict, args) -> dict:
             started = _started(manifest, current) if current else None
             if started is None:
                 raise HelperError("invocation_not_reserved" if current else "invocation_required")
-            if os.path.lexists(os.path.join(manifest["spool_dir"], current, "final.json")):
+            # Closed once its final report exists, and still closed after Studio removed it (its receipt is first).
+            if os.path.lexists(os.path.join(manifest["spool_dir"], current, "final.json")) or _receipt(manifest, current) is not None:
                 raise HelperError("invocation_finalized")
+            if not text.strip():
+                raise HelperError("empty_content")
             records = _slot_records(manifest, current)
             # A record admitted before a crash (its index not yet written) is resumed, never admitted twice.
             mine = [record for record in records if record["event_id"] == event_id]
@@ -943,7 +957,7 @@ def append(manifest: dict, args) -> dict:
                     "created_at": time.time(), "wrapper_version": WRAPPER_VERSION, "sanitizer_version": SANITIZER_VERSION,
                     **render_body(text, None)})
                 slots = _slots_dir(manifest, current)
-                os.makedirs(slots, mode=0o700, exist_ok=True)
+                _durable_dir(slots)
                 publish_json(manifest["outbox_dir"], os.path.basename(_intent_path(manifest)),
                              {"event_id": event_id, "invocation_id": current, "sequence": envelope["sequence"]})
                 # The admission point: the slot holds the frozen record itself, so a crash after this line

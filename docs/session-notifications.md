@@ -350,10 +350,11 @@ worker -> append --event-id E1 --event-kind start ... -> slot 1 of I -> importer
   revision, job, session and generation, invocation, event, kind, slot (`sequence`), `state`,
   reason, `notification_id`, `submitted_sha256`, `accepted_sha256`, `exact` and `record_sha256`.
   `receipt --stream append --event-id E` reads it (a receipt whose event, kind, slot or digest
-  differs from the record answers `unknown`); exit codes as above. Studio settles a slot from the
-  frozen record in `outbox/<binding>/invocations/<I>/<NN>.json` (the spool copy only signals it):
-  an unreadable record holds the slot and the terminal report, and a forged or malformed spool copy
-  changes nothing. It reserves the event for its slot before the inbox sees it, with the inbox key
+  differs from the record answers `unknown`); exit codes as above. Studio enumerates and settles
+  admissions from the frozen records in `outbox/<binding>/invocations/<I>/<NN>.json` (spool copies
+  are only signals): an unreadable record, or an existing receipt that does not describe the settled
+  row, holds the slot and the terminal report, and a lost, forged or malformed spool copy changes
+  nothing. A terminal receipt also closes admission after Studio removed the invocation. It reserves the event for its slot before the inbox sees it, with the inbox key
   `script-report-event:[binding, revision, invocation, slot]`, so a crash or replay can neither move
   the event to another slot nor accept it twice; the receipt is built from that row and the stored
   notice. The same fences apply as for the

@@ -442,21 +442,19 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(shown().at(-1)).toEqual(['terminal', 'done'])
   })
 
-  it('a lost event file is restored from the durable envelope, in order, before the terminal report is imported', () => {
+  it('a lost spool copy neither blocks nor loses its notice: admissions are imported in slot order before the terminal report', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
     append(binding, invocation, 'run-10:start', 'start', 'Job started')
     append(binding, invocation, 'run-10:body', 'body', 'body text')
-    // Crash point: the envelope is durable but the first event never reached the spool.
     rmSync(join(spoolDir(binding), invocation, 'events', '01.json'))
-    expect(m.importer.importScriptReports().accepted).toHaveLength(0) // sequence 2 waits for sequence 1
-    expect(eventFiles(binding, invocation)).toEqual(['02.json'])
-    // The terminal call restores every admitted event before it closes the invocation.
+    expect(m.importer.importScriptReports().accepted).toHaveLength(2)
     expect(complete(binding, invocation, 'run-10:final', 'all done')).toMatchObject({ status: 3 })
-    expect(eventFiles(binding, invocation)).toEqual(['01.json', '02.json'])
     m.importer.importScriptReports()
     expect(shown()).toEqual([['start', 'Job started'], ['body', 'body text'], ['terminal', 'all done']])
+    expect(notices().map(row => row.payload.sequence ?? null)).toEqual([1, 2, null])
   })
+
 
   it('a committed notice is recovered once; a changed replay never acquires another acceptance', () => {
     const binding = bind('launcher.sh')
@@ -621,17 +619,17 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(append(binding, invocation, 'y:start', 'start', 'Job started')).toMatchObject({ status: 0, json: { status: 'accepted' } })
   })
 
-  it('an unreadable events directory holds the terminal report; an append racing the importer is never cleaned up unimported', () => {
+  it('an unreadable admissions directory holds the terminal report; an append racing the importer is never cleaned up unimported', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
     append(binding, invocation, 'z:start', 'start', 'Job started')
     complete(binding, invocation, 'z:final', 'done')
-    const events = join(spoolDir(binding), invocation, 'events')
-    chmodSync(events, 0o000)
+    const admissions = join(m.paths.scriptReportOutboxDir(binding.binding_id), 'invocations', invocation)
+    chmodSync(admissions, 0o000)
     try {
       m.importer.importScriptReports()
     } finally {
-      chmodSync(events, 0o700)
+      chmodSync(admissions, 0o700)
     }
     expect(notices()).toHaveLength(0)
     m.importer.importScriptReports()
@@ -728,13 +726,71 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(m.importer.incompleteScriptReports(binding)).toEqual([expect.objectContaining({ invocation_id: invocation })])
   })
 
-  it('malformed slot names are charged to the import budget', () => {
+  it('stray spool names are not admissions: they cost no import work and never hold the terminal report', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
     append(binding, invocation, 'n:start', 'start', 'budgeted')
     for (let i = 0; i < 5; i++) writeFileSync(join(spoolDir(binding), invocation, 'events', `junk-${i}`), 'x', { mode: 0o600 })
-    expect(m.importer.importScriptReports({ limit: 2 }).processed).toBe(2)
-    expect(eventFiles(binding, invocation)).toHaveLength(4)
+    expect(m.importer.importScriptReports({ limit: 1 }).processed).toBe(1)
+    complete(binding, invocation, 'n:final', 'done')
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'budgeted'], ['terminal', 'done']])
+    expect(spool(binding)).toEqual([])
+  })
+
+
+  it('admissions are enumerated from their frozen records: losing every spool copy after closure loses no notice', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'l:start', 'start', 'kept start')
+    complete(binding, invocation, 'l:final', 'kept done')
+    rmSync(join(spoolDir(binding), invocation, 'events'), { recursive: true, force: true })
+    m.importer.importScriptReports()
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'kept start'], ['terminal', 'kept done']])
+    expect(eventReceipt(binding, 'l:start')).toMatchObject({ state: 'accepted', sequence: 1 })
+  })
+
+  it('a receipt that does not match the committed disposition holds the invocation instead of being trusted', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'q:start', 'start', 'real start')
+    const dir = join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const path = join(dir, `${sha('q:start')}.json`)
+    writeFileSync(path, JSON.stringify({ binding_id: binding.binding_id, event_id: 'q:start', state: 'accepted', notification_id: 999 }))
+    complete(binding, invocation, 'q:final', 'real done')
+    m.importer.importScriptReports()
+    expect(spool(binding)).toEqual([invocation]) // the terminal report waits
+    expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'q:start'])).toMatchObject({ status: 6, json: { status: 'unknown' } })
+    rmSync(path)
+    m.importer.importScriptReports()
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'real start'], ['terminal', 'real done']])
+    expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'q:start'])).toMatchObject({ status: 0, json: { status: 'accepted' } })
+  })
+
+  it('an empty resubmission of an admitted event is a conflict; a terminal receipt closes admission even after cleanup', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'e:start', 'start', 'Job started')
+    expect(append(binding, invocation, 'e:start', 'start', '  ')).toMatchObject({ status: 5, json: { status: 'conflict' } })
+    expect(append(binding, reserve(binding), 'e:start', 'start', '')).toMatchObject({ status: 5, json: { status: 'conflict', invocation_id: invocation } })
+    const started = readFileSync(join(spoolDir(binding), invocation, 'started.json'), 'utf8')
+    complete(binding, invocation, 'e:final', 'done')
+    m.importer.importScriptReports()
+    expect(spool(binding)).not.toContain(invocation)
+    // Race: an append that read the started record just before Studio's cleanup removed the invocation.
+    const late = spawnSync(PYTHON, ['-c', [
+      'import importlib.util, json, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      `saved = json.loads(${JSON.stringify(started)})`,
+      'w._started = lambda manifest, invocation: saved',
+      'sys.exit(w.helper(["append", "--event-id", "e:late", "--event-kind", "body", "--content-file", "-"]))',
+    ].join('\n')], { input: 'too late', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: invocation } })
+    expect({ status: late.status, json: JSON.parse(late.stdout) }).toMatchObject({ status: 2, json: { error: 'invocation_finalized' } })
+    expect(readdirSync(join(m.paths.scriptReportOutboxDir(binding.binding_id), 'invocations', invocation))).toEqual(['01.json'])
   })
 
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {

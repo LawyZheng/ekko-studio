@@ -345,7 +345,12 @@ function writeReceipt(binding: ScriptReportBinding, invocation: string, report: 
 /** First receipt wins: exclusive temp file, fsync, no-replace link, directory fsync. */
 function publishReceipt(dir: string, name: string, receipt: Record<string, unknown>): void {
   const path = join(dir, name)
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    // A new receipts directory must survive power loss with the receipt in it.
+    const parentFd = openSync(dirname(dir), constants.O_RDONLY)
+    try { fsyncSync(parentFd) } catch { /* best effort */ } finally { closeSync(parentFd) }
+  }
   const temp = join(dir, `.${name}.${randomUUID()}.tmp`)
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
   try {
@@ -398,12 +403,21 @@ const eventReceiptName = (eventId: string) => `${sha256(eventId)}.json`
 
 /**
  * The producer-readable receipt of one appended notice, built from its committed event row and the
- * stored notice only (never from a replayed spool file), written before the event file is removed.
+ * stored notice only, written before its spool copy is removed. An existing receipt that does not
+ * describe this row is never trusted: the invocation is held (false) instead.
  */
-function acknowledgeEvent(binding: ScriptReportBinding, entry: ScriptReportEvent, file: string, quarantined: boolean): void {
+function acknowledgeEvent(binding: ScriptReportBinding, entry: ScriptReportEvent, file: string): boolean {
   try {
     const dir = join(scriptReportReceiptsDir(binding.binding_id), 'events')
-    if (!existsSync(join(dir, eventReceiptName(entry.event_id)))) {
+    const path = join(dir, eventReceiptName(entry.event_id))
+    const existing = readPrivateFile(path, 64 * 1024)
+    if (existing) {
+      let found: any = null
+      try { found = JSON.parse(existing.toString('utf8')) } catch { /* unreadable: not this row's receipt */ }
+      if (!found || found.binding_id !== binding.binding_id || found.event_id !== entry.event_id || found.invocation_id !== entry.invocation_id
+        || found.sequence !== entry.sequence || found.state !== entry.state || found.notification_id !== entry.notification_id
+        || found.record_sha256 !== entry.record_sha256) return false
+    } else {
       const notice = entry.notification_id === null ? null : getSessionNotificationById(entry.notification_id)
       const stored = entry.state === 'accepted' && typeof notice?.payload.content === 'string' ? notice.payload.content : null
       const accepted = stored === null ? null : sha256(stored)
@@ -417,53 +431,44 @@ function acknowledgeEvent(binding: ScriptReportBinding, entry: ScriptReportEvent
       })
     }
   } catch {
-    return // the disposition is durable: the file stays and a later pass writes the same receipt
+    return false // the disposition is durable: a later pass writes the same receipt
   }
-  if (quarantined) quarantineEvent(binding, entry.invocation_id, entry.sequence, file)
-  else finish(file)
-}
-
-function quarantineEvent(binding: ScriptReportBinding, invocation: string, sequence: number, file: string): void {
-  const target = scriptReportQuarantineDir(binding.binding_id)
-  mkdirSync(target, { recursive: true, mode: 0o700 })
-  try {
-    renameSync(file, join(target, `${invocation}-event-${sequence}-${Date.now()}`))
-  } catch {
-    finish(file)
-  }
+  finish(file) // the spool copy only signalled the slot
+  return true
 }
 
 /**
  * Import the appended notices of one invocation in slot order, under the same owner fences and
- * generation-fenced inbox acceptance as its terminal report. A later notice waits while an earlier
- * slot is not settled. Returns whether any notice remains: the terminal report and its cleanup wait
- * until every admitted notice is settled.
+ * generation-fenced inbox acceptance as its terminal report. Admissions are enumerated from the frozen
+ * records the helper wrote under its lock (`outbox/invocations/<I>/<NN>.json`), never from spool copies,
+ * so a lost or forged copy neither hides nor changes one. Returns whether any admission is unsettled or
+ * unacknowledged: the terminal report and its cleanup wait until none is.
  */
 function importEvents(namespace: string, binding: ScriptReportBinding, invocation: string, dir: string,
   accepted: SessionNotificationRecord[], budget: { left: number }): boolean {
-  const events = join(dir, 'events')
   let names: string[]
   try {
-    names = readdirSync(events)
+    names = readdirSync(join(scriptReportOutboxDir(binding.binding_id), 'invocations', invocation))
   } catch (error: any) {
-    return error?.code !== 'ENOENT' // an unreadable directory may hold admitted notices: the terminal report waits
+    return error?.code !== 'ENOENT' // unreadable admissions: the terminal report waits
   }
-  for (const name of names.filter(name => name.startsWith(TOMBSTONE_PREFIX))) rmSync(join(events, name), { force: true, recursive: true })
-  names = names.filter(name => !name.startsWith('.')).sort()
-  for (const name of names) {
-    const file = join(events, name)
-    if (budget.left <= 0) return true
+  for (const name of names.filter(name => !name.startsWith('.')).sort()) {
     const slot = EVENT_FILE.exec(name)
-    if (!slot) { budget.left -= 1; quarantineEvent(binding, invocation, 0, file); continue }
+    if (!slot) continue // only NN.json records are admissions
     const sequence = Number(slot[1])
-    const previous = sequence > 1 ? getScriptReportEventAt(binding.binding_id, invocation, sequence - 1) : null
-    if (sequence > 1 && (!previous || previous.state === 'pending')) return true
-    budget.left -= 1
-    if (!settleEvent(namespace, binding, invocation, sequence, accepted)) return true
-    const entry = getScriptReportEventAt(binding.binding_id, invocation, sequence)!
-    acknowledgeEvent(binding, entry, file, entry.state === 'quarantined')
+    const file = join(dir, 'events', name)
+    let entry = getScriptReportEventAt(binding.binding_id, invocation, sequence)
+    if (!entry || entry.state === 'pending') {
+      if (budget.left <= 0) return true
+      const previous = sequence > 1 ? getScriptReportEventAt(binding.binding_id, invocation, sequence - 1) : null
+      if (sequence > 1 && (!previous || previous.state === 'pending')) return true
+      budget.left -= 1
+      if (!settleEvent(namespace, binding, invocation, sequence, accepted)) return true
+      entry = getScriptReportEventAt(binding.binding_id, invocation, sequence)!
+    }
+    if (!acknowledgeEvent(binding, entry, file)) return true
   }
-  return names.some(name => existsSync(join(events, name)))
+  return false
 }
 
 /**
