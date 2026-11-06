@@ -11,7 +11,8 @@ reported, whether scheduled, run manually or started directly.
 
 With ``completion: "detached"`` in the manifest the target is a launcher that hands this
 invocation to a detached worker: a clean launcher exit records a handoff, never a final report,
-and the worker completes the invocation with ``python <this file> complete``. See ``helper``.
+and the worker completes the invocation with ``python <this file> complete``. Before that, the
+worker may add up to eight nonterminal notices to the same invocation with ``append``. See ``helper``.
 
 Standard library only. Nothing here imports Hermes or reads credentials.
 """
@@ -576,8 +577,21 @@ def main() -> None:
                 "launcher_exit_code": 0, "handed_off_at": time.time()})
         else:
             # Never overwrites: a worker that already completed this invocation keeps its report.
-            publish_json(directory, "final.json", build_final(manifest, invocation_id, started_at, monotonic_start,
-                                                              result, True))
+            # Detached: closed under the helper's lock, after restoring every notice it admitted.
+            lock = None
+            if detached:
+                try:
+                    lock = _locked(manifest)
+                except Exception:
+                    lock = None  # an unusable outbox has no admitted notices: report as before
+            try:
+                if detached:
+                    _close_events(manifest, invocation_id)
+                publish_json(directory, "final.json", build_final(manifest, invocation_id, started_at, monotonic_start,
+                                                                  result, True))
+            finally:
+                if lock is not None:
+                    os.close(lock)
     except Exception:
         # Report storage failed after the target ran: never rerun it and never change its
         # streams or exit status. Studio sees a started invocation without a final report.
@@ -589,7 +603,9 @@ def main() -> None:
 #
 # ``python <wrapper> complete --event-id ID --content-file PATH|- [--outcome output|silent|failed]
 #                            [--invocation UUID] [--wait SECONDS]``
-# ``python <wrapper> receipt --event-id ID [--wait SECONDS]``
+# ``python <wrapper> receipt --event-id ID [--stream complete|append] [--wait SECONDS]``
+# ``python <wrapper> append --event-id ID --event-kind start|body|success|failure --content-file PATH|-
+#                          [--invocation UUID] [--wait SECONDS]``
 #
 # The destination is the embedded manifest's binding; nothing here selects a session. ``complete``
 # persists the original delivery envelope of ``ID`` (sanitized body, digest of the submitted bytes,
@@ -597,11 +613,19 @@ def main() -> None:
 # that envelope and its ORIGINAL invocation: identical bytes are a retry (the new invocation, if any,
 # is recorded as silent ``event_retry``), different bytes are refused as a conflict. Delivery is
 # proven only by Studio's receipt for the original invocation, never by the spool or stdout.
+#
+# ``append`` adds a nonterminal notice to the reserved invocation without finalizing it: at most
+# APPEND_LIMIT per invocation, numbered in admission order. Its envelope (the frozen event record)
+# is durable before it reaches the spool; the same ID with the same bytes and kind returns that
+# record, anything else under the ID is a conflict. ``complete`` remains the terminal report: it
+# closes admission and first restores every admitted notice, which Studio imports before it.
 
 HELPER_EXIT = {"accepted": 0, "silent": 0, "queued": 3, "incomplete": 3, "rejected": 4, "quarantined": 4,
                "conflict": 5, "unknown": 6}
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 EVENT_LIMIT = 200
+APPEND_LIMIT = 8
+EVENT_KINDS = ("start", "body", "success", "failure")
 WAIT_LIMIT_SECONDS = 600
 
 
@@ -646,6 +670,7 @@ def _receipt(manifest: dict, invocation_id: str) -> dict | None:
 
 def _complete_invocation(manifest: dict, invocation_id: str, started: dict, outcome: str, body: dict,
                          event_id: str, submitted: str | None, retry_of: str | None = None) -> None:
+    _close_events(manifest, invocation_id)
     now = time.time()
     record = {
         "schema_version": SCHEMA_VERSION, "phase": "final", "identity_kind": "wrapper_invocation",
@@ -769,8 +794,144 @@ def complete(manifest: dict, args) -> dict:
             "vehicle_invocation_id": current, "receipt": receipt}
 
 
+# --- appended notices ----------------------------------------------------------------------------
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _append_paths(manifest: dict, event_id: str) -> tuple[str, str]:
+    """(envelope directory, file name): the envelope is keyed by the event alone, never by an invocation."""
+    return os.path.join(manifest["outbox_dir"], "events"), _digest(event_id) + ".json"
+
+
+def _slots_dir(manifest: dict, invocation_id: str) -> str:
+    return os.path.join(manifest["outbox_dir"], "invocations", invocation_id)
+
+
+def _load_append(manifest: dict, event_id: str) -> dict | None:
+    directory, name = _append_paths(manifest, event_id)
+    envelope = _read_json(os.path.join(directory, name), 256 * 1024)
+    if envelope is None:
+        return None
+    if not isinstance(envelope, dict) or envelope.get("schema_version") != SCHEMA_VERSION or envelope.get("phase") != "event" \
+            or envelope.get("binding_id") != manifest["binding_id"] or envelope.get("binding_revision") != manifest["binding_revision"] \
+            or envelope.get("event_id") != event_id or not UUID_RE.match(str(envelope.get("invocation_id"))) \
+            or envelope.get("event_kind") not in EVENT_KINDS or not isinstance(envelope.get("sequence"), int):
+        raise HelperError("envelope_invalid")
+    return envelope
+
+
+def _deliver_event(manifest: dict, envelope: dict) -> None:
+    """Publish the frozen record into its invocation's spool unless Studio already settled it."""
+    if _event_receipt(manifest, envelope["event_id"]) is not None:
+        return
+    directory = os.path.join(manifest["spool_dir"], envelope["invocation_id"])
+    if not os.path.isdir(directory):
+        return
+    events = os.path.join(directory, "events")
+    os.makedirs(events, mode=0o700, exist_ok=True)
+    name = f"{envelope['sequence']:02d}.json"
+    if not os.path.lexists(os.path.join(events, name)):
+        try:
+            publish_json(events, name, envelope)
+        except FileExistsError:
+            pass
+
+
+def _close_events(manifest: dict, invocation_id: str) -> None:
+    """Before an invocation is finalized: every notice it admitted is in its spool (crash recovery)."""
+    if manifest.get("completion") != "detached":
+        return
+    slots = _slots_dir(manifest, invocation_id)
+    try:
+        names = sorted(name for name in os.listdir(slots) if not name.startswith("."))
+    except FileNotFoundError:
+        return
+    for name in names:
+        slot = _read_json(os.path.join(slots, name), 4096)
+        stored = _read_json(os.path.join(manifest["outbox_dir"], "events", f"{slot.get('event_sha256')}.json"), 256 * 1024) \
+            if isinstance(slot, dict) else None
+        # A slot whose envelope was never written was never admitted (its caller got no answer).
+        envelope = _load_append(manifest, stored.get("event_id")) if isinstance(stored, dict) else None
+        if envelope is not None and envelope["invocation_id"] == invocation_id:
+            _deliver_event(manifest, envelope)
+
+
+def _event_receipt(manifest: dict, event_id: str) -> dict | None:
+    return _read_json(os.path.join(manifest["receipts_dir"], "events", _digest(event_id) + ".json"), 64 * 1024)
+
+
+def _event_status(manifest: dict, envelope: dict) -> tuple[str, dict | None]:
+    receipt = _event_receipt(manifest, envelope["event_id"])
+    if receipt is not None:
+        keys = ("binding_id", "binding_revision", "event_id", "invocation_id", "sequence", "submitted_sha256")
+        if not isinstance(receipt, dict) or any(receipt.get(key) != envelope[key] for key in keys):
+            return "unknown", receipt
+        return receipt.get("state", "unknown"), receipt
+    events = os.path.join(manifest["spool_dir"], envelope["invocation_id"], "events")
+    return ("queued" if os.path.lexists(os.path.join(events, f"{envelope['sequence']:02d}.json")) else "unknown"), None
+
+
+def append(manifest: dict, args) -> dict:
+    event_id = _event(args.event_id)
+    raw = _read_content(args.content_file)
+    submitted = hashlib.sha256(raw).hexdigest()
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        raise HelperError("empty_content")
+    current = args.invocation or os.environ.get("EKKO_SCRIPT_REPORT_INVOCATION") or None
+    lock = _locked(manifest)
+    try:
+        envelope = _load_append(manifest, event_id)
+        if envelope is None:
+            # A new notice needs this caller's own reserved, still open invocation.
+            started = _started(manifest, current) if current else None
+            if started is None:
+                raise HelperError("invocation_not_reserved" if current else "invocation_required")
+            if os.path.lexists(os.path.join(manifest["spool_dir"], current, "final.json")):
+                raise HelperError("invocation_finalized")
+            slots = _slots_dir(manifest, current)
+            os.makedirs(slots, mode=0o700, exist_ok=True)
+            taken = sorted(name for name in os.listdir(slots) if not name.startswith("."))
+            # A slot taken before a crash (envelope not yet written) is resumed, never taken twice.
+            mine = [name for name in taken if (_read_json(os.path.join(slots, name), 4096) or {}).get("event_sha256") == _digest(event_id)]
+            if mine:
+                sequence = int(mine[0])
+            elif len(taken) >= APPEND_LIMIT:
+                raise HelperError("event_limit_reached", "rejected", HELPER_EXIT["rejected"])
+            else:
+                sequence = len(taken) + 1
+                publish_json(slots, f"{sequence:02d}", {"event_sha256": _digest(event_id)})
+            envelope = fit_record({
+                "schema_version": SCHEMA_VERSION, "phase": "event", "binding_id": manifest["binding_id"],
+                "binding_revision": manifest["binding_revision"], "invocation_id": current, "event_id": event_id,
+                "event_kind": args.event_kind, "sequence": sequence, "submitted_sha256": submitted, "created_at": time.time(),
+                "wrapper_version": WRAPPER_VERSION, "sanitizer_version": SANITIZER_VERSION, **render_body(text, None)})
+            directory, name = _append_paths(manifest, event_id)
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            # Durable before the spool sees it: a crash after this line resumes this exact record.
+            publish_json(directory, name, envelope)
+        elif envelope["submitted_sha256"] != submitted or envelope["event_kind"] != args.event_kind:
+            return {"status": "conflict", "event_id": event_id, "invocation_id": envelope["invocation_id"],
+                    "sequence": envelope["sequence"], "receipt": None}
+        _deliver_event(manifest, envelope)
+        status, receipt = _event_status(manifest, envelope)
+    finally:
+        os.close(lock)
+    return {"status": status, "event_id": event_id, "invocation_id": envelope["invocation_id"],
+            "sequence": envelope["sequence"], "receipt": receipt}
+
+
 def receipt(manifest: dict, args) -> dict:
     event_id = _event(args.event_id)
+    if args.stream == "append":
+        envelope = _load_append(manifest, event_id)
+        if envelope is None:
+            return {"status": "unknown", "event_id": event_id, "invocation_id": None, "receipt": None}
+        status, found = _event_status(manifest, envelope)
+        return {"status": status, "event_id": event_id, "invocation_id": envelope["invocation_id"],
+                "sequence": envelope["sequence"], "receipt": found}
     envelope = _load_envelope(manifest, _envelope_path(manifest, event_id), event_id)
     if envelope is None:
         return {"status": "unknown", "event_id": event_id, "invocation_id": None, "receipt": None}
@@ -790,20 +951,32 @@ def helper(argv: list[str]) -> int:
     done.add_argument("--wait", type=float, default=0)
     read = commands.add_parser("receipt")
     read.add_argument("--event-id", required=True)
+    read.add_argument("--stream", choices=("complete", "append"), default="complete")
     read.add_argument("--wait", type=float, default=0)
+    add = commands.add_parser("append")
+    add.add_argument("--event-id", required=True)
+    add.add_argument("--event-kind", choices=EVENT_KINDS, required=True)
+    add.add_argument("--content-file", required=True)
+    add.add_argument("--invocation")
+    add.add_argument("--wait", type=float, default=0)
     args = parser.parse_args(argv)
     try:
         manifest = load_manifest(MANIFEST_PATH)
         if manifest["completion"] != "detached":
             raise HelperError("completion_not_detached")
-        result = (complete if args.command == "complete" else receipt)(manifest, args)
+        result = {"complete": complete, "receipt": receipt, "append": append}[args.command](manifest, args)
+        appended = args.command == "append" or getattr(args, "stream", None) == "append"
         deadline = time.monotonic() + max(0.0, min(args.wait, WAIT_LIMIT_SECONDS))
         while result["status"] in ("queued", "incomplete") and result["invocation_id"] and time.monotonic() < deadline:
             time.sleep(0.5)
             # The same envelope match as the first answer: a receipt of another event or other bytes
             # for that invocation (a failed launcher) never confirms this delivery.
-            envelope = _load_envelope(manifest, _envelope_path(manifest, result["event_id"]), result["event_id"])
-            status, found = _status(manifest, envelope, publish=False) if envelope else ("unknown", None)
+            if appended:
+                envelope = _load_append(manifest, result["event_id"])
+                status, found = _event_status(manifest, envelope) if envelope else ("unknown", None)
+            else:
+                envelope = _load_envelope(manifest, _envelope_path(manifest, result["event_id"]), result["event_id"])
+                status, found = _status(manifest, envelope, publish=False) if envelope else ("unknown", None)
             result.update(status=status, receipt=found)
     except (HelperError, PreflightError, OSError) as exc:
         code = exc.code if isinstance(exc, HelperError) else type(exc).__name__
@@ -814,6 +987,6 @@ def helper(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("complete", "receipt"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("complete", "receipt", "append"):
         sys.exit(helper(sys.argv[1:]))
     main()

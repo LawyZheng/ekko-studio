@@ -354,3 +354,183 @@ function reserve(binding: any): string {
   ].join('\n')], { encoding: 'utf8' })
   return out.stdout.trim()
 }
+
+// Nonterminal notices on ONE reserved detached invocation: `append` adds bounded, distinct notices
+// (start, body, success, failure) that Studio imports while the invocation runs; `complete` stays
+// the terminal report and is imported only after every admitted notice is settled.
+describe('appended script report notices', { timeout: 30_000 }, () => {
+  const append = (binding: any, invocation: string, eventId: string, kind: string, body: string) =>
+    helper(binding, ['append', '--event-id', eventId, '--event-kind', kind, '--content-file', '-'], body, { EKKO_SCRIPT_REPORT_INVOCATION: invocation })
+  const complete = (binding: any, invocation: string, eventId: string, body: string, outcome = 'output') =>
+    helper(binding, ['complete', '--event-id', eventId, '--outcome', outcome, '--content-file', '-'], body, { EKKO_SCRIPT_REPORT_INVOCATION: invocation })
+  const eventReceipt = (binding: any, eventId: string) => {
+    const path = join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events', `${createHash('sha256').update(eventId).digest('hex')}.json`)
+    return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null
+  }
+  const eventFiles = (binding: any, invocation: string) => {
+    const dir = join(spoolDir(binding), invocation, 'events')
+    return existsSync(dir) ? readdirSync(dir).filter((name: string) => !name.startsWith('.')).sort() : []
+  }
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex')
+  const shown = () => notices().filter(row => row.disposition === 'notified').map(row => [row.payload.event_kind ?? 'terminal', row.payload.content])
+
+  it('one invocation delivers start, body and success as distinct notices; the terminal report follows them', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    expect(append(binding, invocation, 'run-7:start', 'start', 'Job started')).toMatchObject({ status: 3,
+      json: { status: 'queued', event_id: 'run-7:start', invocation_id: invocation, sequence: 1 } })
+    // Imported while the invocation still runs: the start notice does not wait for the end.
+    expect(m.importer.importScriptReports().accepted).toHaveLength(1)
+    expect(append(binding, invocation, 'run-7:body', 'body', '| repo | state |\n|---|---|\n| a | ok |')).toMatchObject({ status: 3, json: { sequence: 2 } })
+    expect(append(binding, invocation, 'run-7:success', 'success', 'Job succeeded')).toMatchObject({ status: 3, json: { sequence: 3 } })
+    expect(complete(binding, invocation, 'run-7:final', '', 'silent')).toMatchObject({ status: 3 })
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'Job started'], ['body', '| repo | state |\n|---|---|\n| a | ok |'], ['success', 'Job succeeded']])
+    const rows = notices()
+    expect(rows.every(row => row.payload.invocation_id === invocation)).toBe(true)
+    expect(rows.map(row => row.payload.sequence ?? null)).toEqual([1, 2, 3, null])
+    expect(rows[3]).toMatchObject({ disposition: 'silent', payload: { event_id: 'run-7:final', outcome: 'silent' } })
+    expect(eventReceipt(binding, 'run-7:body')).toEqual({ schema_version: 1, stream: 'append', binding_id: binding.binding_id, binding_revision: 1,
+      job_id: binding.job_id, session_id: 'chat-1', session_generation: binding.session_generation, invocation_id: invocation,
+      event_id: 'run-7:body', event_kind: 'body', sequence: 2, state: 'accepted', reason: null, notification_id: rows[1].id,
+      submitted_sha256: sha('| repo | state |\n|---|---|\n| a | ok |'), accepted_sha256: sha('| repo | state |\n|---|---|\n| a | ok |'),
+      exact: true, record_sha256: expect.stringMatching(/^[0-9a-f]{64}$/), settled_at: expect.any(Number) })
+    expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'run-7:start'])).toMatchObject({ status: 0,
+      json: { status: 'accepted', invocation_id: invocation, receipt: { notification_id: rows[0].id, exact: true } } })
+    // The terminal contract is unchanged: one invocation row and its own receipt.
+    expect(receipt(binding, invocation)).toMatchObject({ event_id: 'run-7:final', state: 'silent', invocation_id: invocation })
+    expect(m.reports.countScriptReportInvocations(binding.binding_id)).toEqual({ accepted: 0, silent: 1, rejected: 0, quarantined: 0 })
+    expect(spool(binding)).toEqual([])
+  })
+
+  it('a failure terminal keeps every earlier notice; retries are idempotent and changed bytes conflict', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'run-8:start', 'start', 'Job started')
+    append(binding, invocation, 'run-8:body', 'body', 'partial result')
+    m.importer.importScriptReports()
+    // Same event, same bytes (before and after import): the original record, sequence and notice.
+    expect(append(binding, invocation, 'run-8:start', 'start', 'Job started')).toMatchObject({ status: 0, json: { status: 'accepted', sequence: 1 } })
+    expect(append(binding, invocation, 'run-8:start', 'start', 'Job started (edited)')).toMatchObject({ status: 5, json: { status: 'conflict', sequence: 1 } })
+    expect(append(binding, invocation, 'run-8:start', 'body', 'Job started')).toMatchObject({ status: 5 })
+    // A distinct event with identical text is a distinct notice.
+    expect(append(binding, invocation, 'run-8:again', 'body', 'partial result')).toMatchObject({ status: 3, json: { sequence: 3 } })
+    // A retry through another invocation resolves the original event; it neither closes nor uses the other one.
+    const other = reserve(binding)
+    expect(append(binding, other, 'run-8:body', 'body', 'partial result')).toMatchObject({ status: 0, json: { invocation_id: invocation, sequence: 2 } })
+    expect(existsSync(finalOf(binding, other))).toBe(false)
+    expect(complete(binding, invocation, 'run-8:failure', 'Job failed: exit 3', 'failed')).toMatchObject({ status: 3 })
+    // Closed: a new event is refused, a known one still answers with its receipt.
+    expect(append(binding, invocation, 'run-8:late', 'body', 'late')).toMatchObject({ status: 2, json: { error: 'invocation_finalized' } })
+    m.importer.importScriptReports()
+    expect(append(binding, invocation, 'run-8:again', 'body', 'partial result')).toMatchObject({ status: 0, json: { status: 'accepted' } })
+    expect(shown()).toEqual([['start', 'Job started'], ['body', 'partial result'], ['body', 'partial result'], ['terminal', 'Job failed: exit 3']])
+    expect(notices().filter(row => row.payload.event_kind).length).toBe(3)
+    expect(spool(binding)).toEqual([other])
+  })
+
+  it('admission is bounded per invocation; retries are free and the overflow is explicit', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    for (let i = 1; i <= 8; i++) expect(append(binding, invocation, `run-9:${i}`, 'body', `part ${i}`)).toMatchObject({ status: 3, json: { sequence: i } })
+    m.importer.importScriptReports()
+    expect(append(binding, invocation, 'run-9:1', 'body', 'part 1')).toMatchObject({ status: 0 })
+    expect(append(binding, invocation, 'run-9:9', 'body', 'part 9')).toMatchObject({ status: 4, json: { error: 'event_limit_reached' } })
+    expect(shown()).toHaveLength(8)
+    expect(complete(binding, invocation, 'run-9:final', 'done')).toMatchObject({ status: 3 })
+    m.importer.importScriptReports()
+    expect(shown().at(-1)).toEqual(['terminal', 'done'])
+  })
+
+  it('a lost event file is restored from the durable envelope, in order, before the terminal report is imported', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'run-10:start', 'start', 'Job started')
+    append(binding, invocation, 'run-10:body', 'body', 'body text')
+    // Crash point: the envelope is durable but the first event never reached the spool.
+    rmSync(join(spoolDir(binding), invocation, 'events', '01.json'))
+    expect(m.importer.importScriptReports().accepted).toHaveLength(0) // sequence 2 waits for sequence 1
+    expect(eventFiles(binding, invocation)).toEqual(['02.json'])
+    // The terminal call restores every admitted event before it closes the invocation.
+    expect(complete(binding, invocation, 'run-10:final', 'all done')).toMatchObject({ status: 3 })
+    expect(eventFiles(binding, invocation)).toEqual(['01.json', '02.json'])
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'Job started'], ['body', 'body text'], ['terminal', 'all done']])
+  })
+
+  it('a committed notice is recovered once; a changed replay never acquires another acceptance', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'run-11:start', 'start', 'Job started')
+    const file = join(spoolDir(binding), invocation, 'events', '01.json')
+    const original = readFileSync(file)
+    m.importer.importScriptReports()
+    const [first] = notices()
+    // Crash point: the inbox committed the notice, its event disposition and receipt were lost.
+    m.db.prepare('DELETE FROM script_report_events WHERE binding_id=?').run(binding.binding_id)
+    rmSync(join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events'), { recursive: true, force: true })
+    writeFileSync(file, original, { mode: 0o600 })
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(1)
+    expect(eventReceipt(binding, 'run-11:start')).toMatchObject({ state: 'accepted', notification_id: first.id })
+    // Changed metadata under the same event: quarantined, the original receipt stays.
+    const tampered = JSON.parse(original.toString('utf8'))
+    writeFileSync(file, JSON.stringify({ ...tampered, content: 'forged' }), { mode: 0o600 })
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(1)
+    expect(eventFiles(binding, invocation)).toEqual([])
+    expect(eventReceipt(binding, 'run-11:start')).toMatchObject({ state: 'accepted', notification_id: first.id })
+  })
+
+  it('concurrent appends get distinct gapless slots; a concurrent duplicate takes one; a racing terminal call closes after them', async () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    const run = (args: string[], input: string) => new Promise<number>(done => {
+      const child = spawn(PYTHON, [wrapperOf(binding), ...args], { env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: invocation } })
+      child.stdin.end(input)
+      child.on('exit', code => done(code ?? -1))
+    })
+    const add = (id: string, text: string) => run(['append', '--event-id', id, '--event-kind', 'body', '--content-file', '-'], text)
+    const codes = await Promise.all([add('c:1', 'one'), add('c:2', 'two'), add('c:3', 'three'), add('c:1', 'one'), add('c:1', 'one'),
+      run(['complete', '--event-id', 'c:final', '--content-file', '-'], 'end')])
+    expect(codes.slice(0, 5).every(code => code === 3 || code === 2)).toBe(true)
+    m.importer.importScriptReports()
+    const rows = notices()
+    const appended = rows.filter(row => row.payload.event_kind)
+    expect(appended.map(row => row.payload.sequence)).toEqual(appended.map((_, index) => index + 1))
+    expect(new Set(appended.map(row => row.payload.event_id)).size).toBe(appended.length)
+    // Whatever was admitted before the terminal call is imported before the terminal report.
+    expect(rows.at(-1)!.payload).toMatchObject({ event_id: 'c:final', content: 'end' })
+    expect(spool(binding)).toEqual([])
+  })
+
+  it('a launcher that fails after appending is closed by the wrapper after its admitted notice', () => {
+    writeFileSync(join(hermesHome, 'scripts', 'reports', 'failing.sh'), ['#!/bin/bash',
+      'printf "Job started" | "$EKKO_SCRIPT_REPORT_PYTHON" "$EKKO_SCRIPT_REPORT_HELPER" append --event-id f:start --event-kind start --content-file - >/dev/null',
+      'echo "boom" >&2', 'exit 3', ''].join('\n'))
+    const binding = bind('failing.sh')
+    expect(fire(binding).status).toBe(3)
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'Job started'], ['terminal', 'Script exited with code 3\nstderr:\nboom']])
+    expect(notices().map(row => row.payload.outcome)).toEqual(['output', 'failed'])
+  })
+
+  it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'run-12:start', 'start', 'Job started')
+    m.importer.setScriptReportJobInspector(null)
+    expect(m.importer.importScriptReports().processed).toBe(0)
+    expect(eventFiles(binding, invocation)).toEqual(['01.json'])
+    m.importer.setScriptReportJobInspector(m.jobs.readNativeJob)
+    m.reports.transitionScriptReportBinding(binding.binding_id, ['active'], 'revoked')
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(0)
+    expect(eventReceipt(binding, 'run-12:start')).toMatchObject({ state: 'rejected', reason: 'binding_revoked', notification_id: null, exact: false })
+    expect(append(binding, invocation, 'run-12:start', 'start', 'Job started')).toMatchObject({ status: 4, json: { status: 'rejected' } })
+    writeFileSync(join(hermesHome, 'scripts', 'reports', 'plain.sh'), '#!/bin/bash\necho hello\n')
+    const sync = bind('plain.sh', 'sync')
+    expect(helper(sync, ['append', '--event-id', 'x', '--event-kind', 'start', '--content-file', '-'], 'x')).toMatchObject({ status: 2,
+      json: { error: 'completion_not_detached' } })
+  })
+})

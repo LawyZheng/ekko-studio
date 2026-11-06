@@ -12,9 +12,13 @@ import {
   type SessionNotificationRecord,
 } from '../../repositories/session-notification-store'
 import {
+  getScriptReportEvent,
+  getScriptReportEventAt,
   getScriptReportInvocation,
   listImportableScriptReportBindings,
+  recordScriptReportEvent,
   recordScriptReportInvocation,
+  type ScriptReportEvent,
   type ScriptReportBinding,
   type ScriptReportInvocationState,
 } from '../../repositories/script-report-store'
@@ -33,6 +37,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const REDACTIONS = new Set(['not_applicable', 'clean', 'redacted', 'failed'])
 const SHA256 = /^[0-9a-f]{64}$/
 const EVENT_ID = /^[^\u0000-\u001f\u007f-\u009f]{1,200}$/
+/** Appended notices per invocation; the wrapper admits no more (APPEND_LIMIT). */
+const EVENT_KINDS = new Set(['start', 'body', 'success', 'failure'])
+const EVENT_FILE = /^(0[1-8])\.json$/
 
 export interface ScriptReportRecord {
   binding_id: string
@@ -183,6 +190,41 @@ export function parseScriptReport(raw: Buffer, binding: ScriptReportBinding, inv
   return value as ScriptReportRecord
 }
 
+/** An appended notice of a reserved detached invocation, as the wrapper's `append` froze it. */
+export interface ScriptReportEventRecord {
+  binding_id: string
+  binding_revision: number
+  invocation_id: string
+  event_id: string
+  event_kind: string
+  sequence: number
+  submitted_sha256: string
+  created_at: number
+  content: string
+  truncated: boolean
+  omitted_reason: string | null
+  redaction_status: string
+}
+
+/** Strict schema check of an appended notice in slot `sequence` of `invocationId`; anything else is quarantined. */
+export function parseScriptReportEvent(raw: Buffer, binding: ScriptReportBinding, invocationId: string, sequence: number): ScriptReportEventRecord | null {
+  let value: any
+  try {
+    value = JSON.parse(raw.toString('utf8'))
+  } catch {
+    return null
+  }
+  if (binding.completion !== 'detached' || !value || typeof value !== 'object' || Array.isArray(value)) return null
+  if (value.schema_version !== 1 || value.phase !== 'event') return null
+  if (value.binding_id !== binding.binding_id || value.binding_revision !== binding.revision || value.invocation_id !== invocationId) return null
+  if (value.sequence !== sequence || !EVENT_KINDS.has(value.event_kind) || typeof value.event_id !== 'string' || !EVENT_ID.test(value.event_id)) return null
+  if (typeof value.submitted_sha256 !== 'string' || !SHA256.test(value.submitted_sha256) || !num(value.created_at)) return null
+  if (typeof value.content !== 'string' || !value.content || Buffer.byteLength(value.content, 'utf8') > SCRIPT_REPORT_LIMITS.contentBytes
+    || value.content.includes('\u0000') || value.omitted_reason !== null) return null
+  if (typeof value.truncated !== 'boolean' || !REDACTIONS.has(value.redaction_status)) return null
+  return value as ScriptReportEventRecord
+}
+
 /** Passive notice disposition of a wrapper outcome; silence is recorded but never shown. */
 function dispositionFor(outcome: string): { disposition: SessionNotificationDisposition; visible: boolean } {
   switch (outcome) {
@@ -195,6 +237,10 @@ function dispositionFor(outcome: string): { disposition: SessionNotificationDisp
 
 export function scriptReportProducerKey(binding: ScriptReportBinding, invocationId: string): string {
   return `script-report:${JSON.stringify([binding.binding_id, binding.revision, invocationId])}`
+}
+
+export function scriptReportEventProducerKey(binding: ScriptReportBinding, invocationId: string, eventId: string): string {
+  return `script-report-event:${JSON.stringify([binding.binding_id, binding.revision, invocationId, eventId])}`
 }
 
 /**
@@ -289,8 +335,14 @@ function writeReceipt(binding: ScriptReportBinding, invocation: string, report: 
     submitted_sha256: submitted, accepted_sha256: accepted, exact: submitted !== null && accepted === submitted,
     settled_at: entry.updated_at,
   }
+  publishReceipt(dir, `${invocation}.json`, receipt)
+}
+
+/** First receipt wins: exclusive temp file, fsync, no-replace link, directory fsync. */
+function publishReceipt(dir: string, name: string, receipt: Record<string, unknown>): void {
+  const path = join(dir, name)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const temp = join(dir, `.${invocation}.${randomUUID()}.tmp`)
+  const temp = join(dir, `.${name}.${randomUUID()}.tmp`)
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
   try {
     writeSync(fd, `${JSON.stringify(receipt)}\n`)
@@ -338,6 +390,140 @@ function rejectUnlessCommitted(namespace: string, binding: ScriptReportBinding, 
   else settle(binding, invocation, dir, 'rejected', report.outcome, reason, null, report)
 }
 
+const eventReceiptName = (eventId: string) => `${sha256(eventId)}.json`
+
+/**
+ * The producer-readable receipt of one appended notice, built from its committed event row and the
+ * stored notice only (never from a replayed spool file), written before the event file is removed.
+ */
+function acknowledgeEvent(binding: ScriptReportBinding, entry: ScriptReportEvent, file: string, quarantined: boolean): void {
+  try {
+    const dir = join(scriptReportReceiptsDir(binding.binding_id), 'events')
+    if (!existsSync(join(dir, eventReceiptName(entry.event_id)))) {
+      const notice = entry.notification_id === null ? null : getSessionNotificationById(entry.notification_id)
+      const stored = entry.state === 'accepted' && typeof notice?.payload.content === 'string' ? notice.payload.content : null
+      const accepted = stored === null ? null : sha256(stored)
+      publishReceipt(dir, eventReceiptName(entry.event_id), {
+        schema_version: 1, stream: 'append', binding_id: binding.binding_id, binding_revision: entry.binding_revision, job_id: binding.job_id,
+        session_id: binding.session_id, session_generation: notice?.session_generation ?? binding.session_generation,
+        invocation_id: entry.invocation_id, event_id: entry.event_id, event_kind: entry.event_kind, sequence: entry.sequence,
+        state: entry.state, reason: entry.detail, notification_id: entry.notification_id, submitted_sha256: entry.submitted_sha256,
+        accepted_sha256: accepted, exact: accepted !== null && accepted === entry.submitted_sha256, record_sha256: entry.record_sha256,
+        settled_at: entry.updated_at,
+      })
+    }
+  } catch {
+    return // the disposition is durable: the file stays and a later pass writes the same receipt
+  }
+  if (quarantined) quarantineEvent(binding, entry.invocation_id, entry.sequence, file)
+  else finish(file)
+}
+
+function quarantineEvent(binding: ScriptReportBinding, invocation: string, sequence: number, file: string): void {
+  const target = scriptReportQuarantineDir(binding.binding_id)
+  mkdirSync(target, { recursive: true, mode: 0o700 })
+  try {
+    renameSync(file, join(target, `${invocation}-event-${sequence}-${Date.now()}`))
+  } catch {
+    finish(file)
+  }
+}
+
+/**
+ * Import the appended notices of one invocation in sequence order, under the same owner fences and
+ * generation-fenced inbox acceptance as its terminal report. A later notice waits while an earlier
+ * slot is neither settled nor present. Returns whether any notice remains: the terminal report and
+ * its cleanup wait until every admitted notice is settled.
+ */
+function importEvents(namespace: string, binding: ScriptReportBinding, invocation: string, dir: string,
+  accepted: SessionNotificationRecord[], budget: { left: number }): boolean {
+  const events = join(dir, 'events')
+  let names: string[]
+  try {
+    names = readdirSync(events)
+  } catch {
+    return false
+  }
+  for (const name of names.filter(name => name.startsWith(TOMBSTONE_PREFIX))) rmSync(join(events, name), { force: true, recursive: true })
+  names = names.filter(name => !name.startsWith('.')).sort()
+  for (const name of names) {
+    const file = join(events, name)
+    const slot = EVENT_FILE.exec(name)
+    if (!slot) { quarantineEvent(binding, invocation, 0, file); continue }
+    if (budget.left <= 0) return true
+    const sequence = Number(slot[1])
+    if (sequence > 1 && !getScriptReportEventAt(binding.binding_id, invocation, sequence - 1)) return true
+    budget.left -= 1
+    const raw = readPrivateFile(file, SCRIPT_REPORT_LIMITS.recordBytes)
+    const event = raw ? parseScriptReportEvent(raw, binding, invocation, sequence) : null
+    const recordSha = raw ? createHash('sha256').update(raw).digest('hex') : null
+    const record = (state: ScriptReportEvent['state'], detail: string | null, notificationId: number | null) => {
+      recordScriptReportEvent({ binding_id: binding.binding_id, binding_revision: binding.revision, event_id: event?.event_id ?? `invalid:${invocation}:${sequence}`,
+        invocation_id: invocation, sequence, event_kind: event?.event_kind ?? null, state, notification_id: notificationId, detail,
+        submitted_sha256: event?.submitted_sha256 ?? null, record_sha256: recordSha })
+      const entry = getScriptReportEventAt(binding.binding_id, invocation, sequence)
+      if (entry) acknowledgeEvent(binding, entry, file, entry.state === 'quarantined')
+    }
+    const slotted = getScriptReportEventAt(binding.binding_id, invocation, sequence)
+    if (!event) {
+      if (slotted) quarantineEvent(binding, invocation, sequence, file) // the settled original keeps its disposition
+      else record('quarantined', 'invalid_report', null)
+      continue
+    }
+    const prior = getScriptReportEvent(binding.binding_id, binding.revision, event.event_id)
+    if (prior || slotted) {
+      // A replay completes the original acknowledgement; changed bytes never acquire its disposition.
+      if (prior && slotted && prior.invocation_id === invocation && prior.sequence === sequence && prior.record_sha256 === recordSha) {
+        acknowledgeEvent(binding, prior, file, prior.state === 'quarantined')
+      } else quarantineEvent(binding, invocation, sequence, file)
+      continue
+    }
+    const key = scriptReportEventProducerKey(binding, invocation, event.event_id)
+    const committed = () => {
+      const notice = getSessionNotification(namespace, binding.profile, key)
+      return notice && notice.payload.record_sha256 === recordSha ? notice : null
+    }
+    const verdict = ownerVerdict(binding)
+    if (verdict) {
+      const historical = committed()
+      if (historical) record('accepted', null, historical.id)
+      else record('rejected', verdict, null)
+      continue
+    }
+    const content = sanitizeScriptReportText(event.content)
+    const result = acceptFencedSessionNotification({
+      namespace,
+      profile: binding.profile,
+      producerKey: key,
+      sessionId: binding.session_id,
+      expectedGeneration: binding.session_generation,
+      kind: 'script_report',
+      disposition: 'notified',
+      payload: {
+        source: 'script-report', identity_kind: 'wrapper_invocation', native_execution_id: null,
+        binding_id: binding.binding_id, binding_revision: binding.revision, invocation_id: invocation,
+        job_id: binding.job_id, job_name: binding.job_name, outcome: event.event_kind === 'failure' ? 'failed' : 'output',
+        exit_code: null, signal: null, reason: null, truncated: event.truncated,
+        redaction_status: content !== event.content ? 'redacted' : event.redaction_status,
+        started_at: event.created_at, finished_at: event.created_at, content,
+        completion: 'detached', phase: 'event', event_id: event.event_id, event_kind: event.event_kind, sequence,
+        submitted_sha256: event.submitted_sha256, record_sha256: recordSha,
+        ...(binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch,
+          ...(binding.target_owner !== null ? { owner: binding.target_owner } : {}) } } : {}),
+      },
+    })
+    if (!('record' in result)) {
+      const historical = result.status === 'conflict' ? null : committed()
+      if (historical) record('accepted', null, historical.id)
+      else record(result.status === 'conflict' ? 'quarantined' : 'rejected', result.status === 'conflict' ? 'notification_conflict' : 'owner_missing', null)
+    } else {
+      record('accepted', null, result.record.id)
+      if (result.status === 'accepted') accepted.push(result.record)
+    }
+  }
+  return names.some(name => existsSync(join(events, name)))
+}
+
 /**
  * Import finished wrapper reports into their bound sessions. The binding, not the report, decides
  * the destination. Acceptance is generation-fenced and idempotent; a spool entry is removed only
@@ -375,6 +561,11 @@ export function importScriptReports(options: { namespace?: string; limit?: numbe
         quarantine(binding, invocation.replace(/[^A-Za-z0-9-]/g, '_').slice(0, 64), dir)
         continue
       }
+      // Appended notices first, also while the invocation still runs; the terminal report waits for them.
+      const budget = { left: limit - processed }
+      const waiting = importEvents(namespace, binding, invocation, dir, accepted, budget)
+      processed = limit - budget.left
+      if (waiting || processed >= limit) continue
       let finalStat
       try { finalStat = lstatSync(join(dir, 'final.json')) } catch { continue } // started, not finished
       processed += 1

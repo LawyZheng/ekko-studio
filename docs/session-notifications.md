@@ -313,6 +313,44 @@ detached worker (inherits EKKO_SCRIPT_REPORT_*) -> python <wrapper> complete --e
   `[label](https://host/x)` with `[`/`]` in the label escaped (see
   `tests/server/fixtures/detached-report/worker.py`); Studio does not rewrite report bodies.
 
+#### Appended notices (detached only)
+
+A detached invocation can carry up to **eight** nonterminal notices before its terminal report, so
+one run can show "started", the report body and "succeeded"/"failed" as separate cards without a
+fake invocation per message. `complete` stays the only terminal call.
+
+```text
+worker -> append --event-id E1 --event-kind start ... -> slot 1 of I -> importer -> notice + receipt of E1
+       -> append --event-id E2 --event-kind body ...  -> slot 2 of I -> importer -> notice + receipt of E2
+       -> complete --event-id E3 ...                  -> final.json of I (after slots 1..n) -> terminal notice
+```
+
+- **Command.** `append --event-id E --event-kind start|body|success|failure --content-file PATH|-
+  [--invocation I] [--wait SECONDS]`. It needs the caller's own reserved invocation that is still
+  open (`invocation_finalized` once its final report exists) and non-empty content. Slots are
+  numbered in admission order under the helper's lock; the ninth new event of one invocation is
+  refused (`event_limit_reached`, exit 4) and nothing earlier is replaced. Budget your lifecycle
+  messages within the bound; retries take no slot.
+- **Identity.** The frozen event record (sanitized body, submitted digest, invocation, slot, kind)
+  is written to `outbox/<binding>/events/<sha256(E)>.json` before it reaches the spool. The same `E`
+  with the same bytes and kind returns that record from any invocation (it never closes or uses the
+  caller's invocation); other bytes or kind are a `conflict` (exit 5). Distinct events with the same
+  text are distinct notices. Use one event id per business occurrence and stage, for example
+  `daily-report:$DAY:start`.
+- **Order and closure.** Studio imports slot `n` only after slot `n-1` is settled, while the
+  invocation still runs; its terminal report (and the spool cleanup) waits until every admitted
+  slot is settled. `complete`, and the wrapper's own failure report, first restore any admitted
+  slot missing from the spool (a crash after its envelope). Only new events are refused after
+  closure; a known event keeps answering with its receipt.
+- **Receipt.** `receipts/<binding>/events/<sha256(E)>.json` (`stream: "append"`): binding and
+  revision, job, session and generation, invocation, event, kind, slot (`sequence`), `state`,
+  reason, `notification_id`, `submitted_sha256`, `accepted_sha256`, `exact` and `record_sha256`.
+  `receipt --stream append --event-id E` reads it; exit codes as above. Studio builds it from its
+  committed event row and stored notice, never from a replayed spool file: a replay with changed
+  bytes is quarantined and cannot inherit an earlier acceptance. The same fences apply as for the
+  terminal report. The terminal invocation row, receipt and health counts are unchanged, and
+  synchronous bindings cannot append.
+
 ## Consent requests (model-initiated delivery)
 
 The direct binding and enrollment endpoints accept only a login credential. A model turn's ordinary
