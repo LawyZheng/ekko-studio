@@ -954,12 +954,16 @@ def append(manifest: dict, args) -> dict:
             elif len(records) >= APPEND_LIMIT:
                 raise HelperError("event_limit_reached", "rejected", HELPER_EXIT["rejected"])
             else:
+                body = render_body(text, None)
+                if body["content"] is None:
+                    # Sanitization failed: refuse before anything durable, so no identity or slot is consumed.
+                    raise HelperError("redaction_failed")
                 envelope = fit_record({
                     "schema_version": SCHEMA_VERSION, "phase": "event", "binding_id": manifest["binding_id"],
                     "binding_revision": manifest["binding_revision"], "invocation_id": current, "event_id": event_id,
                     "event_kind": args.event_kind, "sequence": len(records) + 1, "submitted_sha256": submitted,
                     "created_at": time.time(), "wrapper_version": WRAPPER_VERSION, "sanitizer_version": SANITIZER_VERSION,
-                    **render_body(text, None)})
+                    **body})
                 slots = _slots_dir(manifest, current)
                 _durable_dir(slots)
                 publish_json(manifest["outbox_dir"], os.path.basename(_intent_path(manifest)),

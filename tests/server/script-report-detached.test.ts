@@ -840,6 +840,30 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(existsSync(join(spoolDir(binding), invocation))).toBe(false)
   })
 
+  it('FAILURE INJECTION (no ordinary trigger known): a sanitizer exception refuses the append before any admission', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    const injected = spawnSync(PYTHON, ['-c', [
+      'import importlib.util, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'def broken(text): raise RuntimeError("injected sanitizer fault")',
+      'w.sanitize = broken',
+      'sys.exit(w.helper(["append", "--event-id", "s:body", "--event-kind", "body", "--content-file", "-"]))',
+    ].join('\n')], { input: 'secret body token=abcdef1234567890', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: invocation } })
+    expect({ status: injected.status, json: JSON.parse(injected.stdout) }).toEqual({ status: 2, json: { status: 'error', error: 'redaction_failed' } })
+    const outbox = m.paths.scriptReportOutboxDir(binding.binding_id)
+    expect(existsSync(join(outbox, 'invocations', invocation))).toBe(false)
+    expect(existsSync(join(outbox, 'events', `${sha('s:body')}.json`))).toBe(false)
+    expect(existsSync(join(outbox, 'admitting.json'))).toBe(false)
+    // Nothing was consumed: the same event later admits normally and the invocation drains.
+    expect(append(binding, invocation, 's:body', 'body', 'clean body')).toMatchObject({ status: 3, json: { sequence: 1 } })
+    complete(binding, invocation, 's:final', 'done')
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['body', 'clean body'], ['terminal', 'done']])
+    expect(spool(binding)).toEqual([])
+  })
+
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
