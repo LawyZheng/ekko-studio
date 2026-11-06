@@ -20,7 +20,7 @@ import { loginUser, requestProfile, sendError } from './cron-consent'
 
 /** A dispatch keeps its admission authority until it finishes, at most this long. */
 const DISPATCH_DEADLINE_MS = 120_000
-const OPERATION_FIELDS = ['kind', 'mode', 'job_id', 'name', 'schedule', 'script', 'workdir', 'interpreter', 'paused', 'prompt', 'target_session_id']
+const OPERATION_FIELDS = ['kind', 'mode', 'job_id', 'name', 'schedule', 'script', 'workdir', 'interpreter', 'paused', 'prompt', 'target_session_id', 'completion']
 
 const policyView = (profile: string, policy: TrustedCronPolicy) =>
   ({ profile, enabled: policy.enabled, revision: policy.revision, updated_at: policy.updated_at })
@@ -64,7 +64,7 @@ export async function admit(ctx: Context) {
   const authority = ctx.state.cronAdmission as ({ accountId: number; profile: string; sessionId: string; generation: string; epoch: string; token: string; isActive: () => boolean }) | undefined
   if (!authority) { ctx.status = 403; ctx.body = { error: 'trusted_capability_required' }; return }
   const raw = ctx.request.body as { profile: string; kind: string; mode?: string; job_id?: string; name?: string; schedule?: string; script?: string; workdir?: string
-    interpreter?: string; paused?: boolean; prompt?: string; target_session_id?: string } | undefined
+    interpreter?: string; paused?: boolean; prompt?: string; target_session_id?: string; completion?: string } | undefined
   const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
   if (!requestProfile(ctx, input.profile)) return
   try {
@@ -84,7 +84,7 @@ export async function dispatch(ctx: Context) {
   const user = await loginUser(ctx)
   if (!user) return
   const raw = ctx.request.body as { profile: string; session_id: string; kind: string; mode?: string; job_id?: string; name?: string; schedule?: string; script?: string; workdir?: string
-    interpreter?: string; paused?: boolean; prompt?: string; target_session_id?: string } | undefined
+    interpreter?: string; paused?: boolean; prompt?: string; target_session_id?: string; completion?: string } | undefined
   const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
   const profile = requestProfile(ctx, input.profile)
   if (!profile) return

@@ -259,7 +259,8 @@ session (`setsid`), returns silently, and the worker composes and delivers the r
 The default wrapper would report the silent launcher. Enrollment with `"completion": "detached"`
 (login `POST …/enrollments`, or a consent request `script_report_enrollment` in `mode: "new"` or
 `"existing"`; the card shows it) freezes another contract into the manifest and binding. Trusted
-current-session automation still enrolls synchronous reports only.
+current-session automation accepts the same `completion` when it adopts an existing job
+(`mode: "existing"`); its new-job enrollment remains synchronous.
 
 ```text
 Hermes scheduler -> wrapper (reserves invocation I) -> launcher exits 0 -> handoff.json (not a report)
@@ -456,7 +457,8 @@ PUT /api/hermes/cron/trusted-automation  { profile, enabled, expected_revision }
 - **Admission.** `POST /api/hermes/cron/current-session` with `kind: "cron_job"` (`name`,
   `schedule`, `prompt`: native create paused and local, bind, resume),
   `"cron_session_binding"` + `job_id` (an unbound agent job; a bound one is refused
-  `job_already_bound`), or `"script_report_enrollment"` (`mode` new or existing, as above). The
+  `job_already_bound`), or `"script_report_enrollment"` (`mode` new or existing, as above; existing
+  also takes `completion`, default `sync`). The
   destination is the authority's session, or an optional `target_session_id`: another session of the
   same account and profile, validated exactly like a consent target (unknown, deleted, unattributed,
   foreign-account or other-profile targets are refused before any native call) and frozen with its

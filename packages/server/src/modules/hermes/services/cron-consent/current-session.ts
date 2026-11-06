@@ -97,7 +97,7 @@ export async function admitCurrentSessionCron(authority: CronAdmissionAuthority,
       targetOwner: destination.targetOwner, trustedEpoch: epoch, recheck: recheck(EnrollmentError) }
     const mode = input.mode === undefined ? 'new' : input.mode
     if (mode === 'existing') {
-      const plan = prepareAdoption(profile, String(input.job_id ?? ''))
+      const plan = prepareAdoption(profile, String(input.job_id ?? ''), input.completion)
       refuseExternalFailureLane(profile, plan.jobId)
       run = async () => { const result = await executeAdoption(plan, scriptDestination, { runner }); return { job_id: result.binding.job_id, resumed: result.resumed } }
     } else if (mode === 'new') {
