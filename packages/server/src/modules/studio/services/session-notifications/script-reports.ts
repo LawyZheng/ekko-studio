@@ -40,6 +40,8 @@ const EVENT_ID = /^[^\u0000-\u001f\u007f-\u009f]{1,200}$/
 /** Appended notices per invocation; the wrapper admits no more (APPEND_LIMIT). */
 const EVENT_KINDS = new Set(['start', 'body', 'success', 'failure'])
 const EVENT_FILE = /^(0[1-8])\.json$/
+/** The helper counts an event id in characters (code points), as Python does; so does this check. */
+const APPENDED_EVENT_ID = new RegExp(EVENT_ID.source, 'u')
 
 export interface ScriptReportRecord {
   binding_id: string
@@ -217,7 +219,7 @@ export function parseScriptReportEvent(raw: Buffer, binding: ScriptReportBinding
   if (binding.completion !== 'detached' || !value || typeof value !== 'object' || Array.isArray(value)) return null
   if (value.schema_version !== 1 || value.phase !== 'event') return null
   if (value.binding_id !== binding.binding_id || value.binding_revision !== binding.revision || value.invocation_id !== invocationId) return null
-  if (value.sequence !== sequence || !EVENT_KINDS.has(value.event_kind) || typeof value.event_id !== 'string' || !EVENT_ID.test(value.event_id)) return null
+  if (value.sequence !== sequence || !EVENT_KINDS.has(value.event_kind) || typeof value.event_id !== 'string' || !APPENDED_EVENT_ID.test(value.event_id)) return null
   if (typeof value.submitted_sha256 !== 'string' || !SHA256.test(value.submitted_sha256) || !num(value.created_at)) return null
   if (typeof value.content !== 'string' || !value.content || Buffer.byteLength(value.content, 'utf8') > SCRIPT_REPORT_LIMITS.contentBytes
     || value.content.includes('\u0000') || value.omitted_reason !== null) return null
@@ -480,7 +482,7 @@ function importEvents(namespace: string, binding: ScriptReportBinding, invocatio
     }
     const slotted = getScriptReportEventAt(binding.binding_id, invocation, sequence)
     if (!event) {
-      if (slotted) quarantineEvent(binding, invocation, sequence, file) // the settled original keeps its disposition
+      if (slotted) acknowledgeEvent(binding, slotted, file, true) // the settled original keeps its disposition and receipt
       else record('quarantined', 'invalid_report', null)
       continue
     }

@@ -553,10 +553,9 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
       'import importlib.util, os, sys',
       `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
       'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
-      'original, calls = w.publish_json, []',
+      'original = w.publish_json',
       'def publish(*a, **k):',
-      '    calls.append(a[1])',
-      '    if len(calls) > 1: os._exit(9)',
+      '    if a[0].endswith("/events") and "/outbox/" in a[0]: os._exit(9)',
       '    return original(*a, **k)',
       'w.publish_json = publish',
       'sys.exit(w.helper(["append", "--event-id", "x:start", "--event-kind", "start", "--content-file", "-"]))',
@@ -570,6 +569,30 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(spool(binding)).toEqual([])
     // The interrupted caller's retry finds its original record and receipt.
     expect(append(binding, invocation, 'x:start', 'start', 'Job started')).toMatchObject({ status: 0, json: { sequence: 1, status: 'accepted' } })
+  })
+
+  it('a retry through another invocation inside that crash window resolves the original record, consuming nothing', () => {
+    const binding = bind('launcher.sh')
+    const first = reserve(binding)
+    const crash = spawnSync(PYTHON, ['-c', [
+      'import importlib.util, os, sys',
+      `spec = importlib.util.spec_from_file_location("w", ${JSON.stringify(wrapperOf(binding))})`,
+      'w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)',
+      'original = w.publish_json',
+      'def publish(*a, **k):',
+      '    if a[0].endswith("/events") and "/outbox/" in a[0]: os._exit(9)',
+      '    return original(*a, **k)',
+      'w.publish_json = publish',
+      'sys.exit(w.helper(["append", "--event-id", "v:start", "--event-kind", "start", "--content-file", "-"]))',
+    ].join('\n')], { input: 'Job started', encoding: 'utf8', env: { ...process.env, EKKO_SCRIPT_REPORT_INVOCATION: first } })
+    expect(crash.status).toBe(9)
+    const second = reserve(binding)
+    expect(append(binding, second, 'v:start', 'start', 'Job started (other bytes)')).toMatchObject({ status: 5, json: { status: 'conflict', invocation_id: first, sequence: 1 } })
+    expect(append(binding, second, 'v:start', 'body', 'Job started')).toMatchObject({ status: 5, json: { invocation_id: first } })
+    expect(append(binding, second, 'v:start', 'start', 'Job started')).toMatchObject({ status: 3, json: { invocation_id: first, sequence: 1 } })
+    expect(existsSync(join(m.paths.scriptReportOutboxDir(binding.binding_id), 'invocations', second))).toBe(false)
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'Job started']])
   })
 
   it('a replay that changes the event of a slot committed just before a crash never gets a second notice', () => {
@@ -588,6 +611,14 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(notices()).toHaveLength(1)
     expect(eventReceipt(binding, 'y:start')).toMatchObject({ state: 'accepted', notification_id: first.id, sequence: 1, exact: true })
     expect(eventReceipt(binding, 'y:other')).toBeNull()
+    // Same crash window, then a malformed replay and an existing terminal report: the receipt is still written first.
+    m.db.prepare('DELETE FROM script_report_events WHERE binding_id=?').run(binding.binding_id)
+    rmSync(join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events'), { recursive: true, force: true })
+    writeFileSync(file, '{"not": "an event"', { mode: 0o600 })
+    complete(binding, invocation, 'y:final', 'done')
+    m.importer.importScriptReports()
+    expect(eventReceipt(binding, 'y:start')).toMatchObject({ state: 'accepted', notification_id: first.id, sequence: 1 })
+    expect(append(binding, invocation, 'y:start', 'start', 'Job started')).toMatchObject({ status: 0, json: { status: 'accepted' } })
   })
 
   it('an unreadable events directory holds the terminal report; an append racing the importer is never cleaned up unimported', () => {
@@ -622,6 +653,16 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     m.importer.importScriptReports()
     expect(shown().slice(2)).toEqual([['start', 'Run started'], ['body', 'Run body'], ['terminal', 'Run done']])
     expect(spool(binding)).toEqual([])
+  })
+
+  it('an event id the helper admits (200 characters, astral ones included) is the id the importer settles', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    const id = '\u{1F4E6}'.repeat(101)
+    expect(append(binding, invocation, id, 'start', 'Packed')).toMatchObject({ status: 3, json: { sequence: 1 } })
+    m.importer.importScriptReports()
+    expect(eventReceipt(binding, id)).toMatchObject({ state: 'accepted', event_id: id, exact: true })
+    expect(shown()).toEqual([['start', 'Packed']])
   })
 
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {

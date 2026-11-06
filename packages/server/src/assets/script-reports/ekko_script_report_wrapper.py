@@ -839,6 +839,27 @@ def _slot_records(manifest: dict, invocation_id: str) -> list[dict]:
     return records
 
 
+def _intent_path(manifest: dict) -> str:
+    return os.path.join(manifest["outbox_dir"], "admitting.json")
+
+
+def _finish_admission(manifest: dict) -> None:
+    """Under the lock: complete an admission a crash interrupted after its slot record, so the event is
+    findable by its id from ANY invocation before anything else is admitted (one admission at a time)."""
+    path = _intent_path(manifest)
+    intent = _read_json(path, 4096)
+    if intent is None:
+        return
+    if not isinstance(intent, dict) or not UUID_RE.match(str(intent.get("invocation_id"))) or not isinstance(intent.get("sequence"), int):
+        raise HelperError("envelope_invalid")
+    slot = os.path.join(_slots_dir(manifest, intent["invocation_id"]), f"{intent['sequence']:02d}.json")
+    record = _read_json(slot, 256 * 1024)
+    if record is not None:  # no slot record: the admission never happened and its caller got no answer
+        _index(manifest, _valid_append(manifest, record, intent.get("event_id")))
+    os.unlink(path)
+    _fsync_dir(manifest["outbox_dir"])
+
+
 def _index(manifest: dict, envelope: dict) -> None:
     """The event's lookup copy of its slot record; never replaces an existing one."""
     directory, name = _append_paths(manifest, envelope["event_id"])
@@ -870,6 +891,8 @@ def _close_events(manifest: dict, invocation_id: str) -> None:
     """Before an invocation is finalized: every notice it admitted is in its spool (crash recovery)."""
     if manifest.get("completion") != "detached":
         return
+    if os.path.isdir(manifest["outbox_dir"]):
+        _finish_admission(manifest)
     for envelope in _slot_records(manifest, invocation_id):
         _index(manifest, envelope)
         _deliver_event(manifest, envelope)
@@ -900,6 +923,7 @@ def append(manifest: dict, args) -> dict:
     current = args.invocation or os.environ.get("EKKO_SCRIPT_REPORT_INVOCATION") or None
     lock = _locked(manifest)
     try:
+        _finish_admission(manifest)
         envelope = _load_append(manifest, event_id)
         if envelope is None:
             # A new notice needs this caller's own reserved, still open invocation.
@@ -924,10 +948,14 @@ def append(manifest: dict, args) -> dict:
                     **render_body(text, None)})
                 slots = _slots_dir(manifest, current)
                 os.makedirs(slots, mode=0o700, exist_ok=True)
+                publish_json(manifest["outbox_dir"], os.path.basename(_intent_path(manifest)),
+                             {"event_id": event_id, "invocation_id": current, "sequence": envelope["sequence"]})
                 # The admission point: the slot holds the frozen record itself, so a crash after this line
-                # leaves a complete record that closure delivers and a retry resumes; never an empty slot.
+                # leaves a complete record that closure delivers and the next admission indexes.
                 publish_json(slots, f"{envelope['sequence']:02d}.json", envelope)
             _index(manifest, envelope)
+            if os.path.lexists(_intent_path(manifest)):
+                os.unlink(_intent_path(manifest))
         if envelope["submitted_sha256"] != submitted or envelope["event_kind"] != args.event_kind:
             return {"status": "conflict", "event_id": event_id, "invocation_id": envelope["invocation_id"],
                     "sequence": envelope["sequence"], "receipt": None}

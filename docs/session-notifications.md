@@ -355,6 +355,9 @@ worker -> append --event-id E1 --event-kind start ... -> slot 1 of I -> importer
   the inbox rather than accepted twice. The same fences apply as for the
   terminal report. The terminal invocation row, receipt and health counts are unchanged, and
   synchronous bindings cannot append.
+- **Retention.** The bound is per invocation, not for the lifetime of a binding: slot records,
+  event index copies, receipts and event rows are kept (they are the replay identity), like the
+  terminal receipts and invocation rows.
 - **Downgrade.** A Studio release without this importer ignores `events/`: it imports the terminal
   report and removes the invocation spool, so pending appended notices are lost and its terminal
   receipt says nothing about them. Before downgrading, stop producers that append and wait until
