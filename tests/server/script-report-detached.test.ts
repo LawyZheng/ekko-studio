@@ -515,6 +515,36 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(notices().map(row => row.payload.outcome)).toEqual(['output', 'failed'])
   })
 
+  it('each owner fence rejects a pending notice without rerouting; a mismatching receipt is ambiguous, never a delivery', () => {
+    const job = (binding: any) => jobs.find(item => item.id === binding.job_id)
+    const losses: Array<[string, (binding: any) => () => void]> = [
+      ['account_forbidden', () => { m.users.updateUser({ userId: member.id, status: 'disabled' }); return () => m.users.updateUser({ userId: member.id, status: 'active' }) }],
+      ['account_forbidden', () => { m.users.updateUser({ userId: member.id, profiles: ['other'] }); return () => m.users.updateUser({ userId: member.id, profiles: ['default'] }) }],
+      ['target_changed', binding => { job(binding).deliver = 'slack:C1'; saveJobs(); return () => { job(binding).deliver = 'local'; saveJobs() } }],
+      ['policy_revoked', binding => { m.db.prepare('UPDATE script_report_bindings SET trusted_epoch=? WHERE binding_id=?').run('stale-epoch', binding.binding_id); return () => {} }],
+      ['owner_missing', binding => { m.db.prepare('UPDATE script_report_bindings SET target_owner=? WHERE binding_id=?').run(member.id + 1000, binding.binding_id); return () => {} }],
+      ['owner_missing', () => { m.store.clearSessionMessages('chat-1'); return () => {} }], // a reset rotates the frozen generation
+    ]
+    for (const [index, [reason, lose]] of losses.entries()) {
+      const binding = bind('launcher.sh')
+      append(binding, reserve(binding), `fence-${index}`, 'start', `notice ${index}`)
+      const restore = lose(binding)
+      m.importer.importScriptReports()
+      restore()
+      expect(eventReceipt(binding, `fence-${index}`), reason).toMatchObject({ state: 'rejected', reason, notification_id: null, accepted_sha256: null, exact: false })
+      expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', `fence-${index}`])).toMatchObject({ status: 4, json: { status: 'rejected' } })
+    }
+    expect(notices()).toHaveLength(0)
+    // A receipt that does not match the event's own record (other bytes) says nothing about this delivery.
+    const binding = m.reports.getScriptReportBinding(bind('launcher.sh').binding_id)
+    append(binding, reserve(binding), 'ambiguous', 'start', 'original')
+    m.importer.importScriptReports()
+    const path = join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events', `${sha('ambiguous')}.json`)
+    writeFileSync(path, JSON.stringify({ ...eventReceipt(binding, 'ambiguous'), submitted_sha256: sha('other') }))
+    expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'ambiguous'])).toMatchObject({ status: 6, json: { status: 'unknown' } })
+    expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'never-appended'])).toMatchObject({ status: 6, json: { status: 'unknown', receipt: null } })
+  })
+
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)
