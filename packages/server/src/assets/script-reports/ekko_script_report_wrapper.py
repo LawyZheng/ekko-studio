@@ -578,12 +578,8 @@ def main() -> None:
         else:
             # Never overwrites: a worker that already completed this invocation keeps its report.
             # Detached: closed under the helper's lock, after restoring every notice it admitted.
-            lock = None
-            if detached:
-                try:
-                    lock = _locked(manifest)
-                except Exception:
-                    lock = None  # an unusable outbox has no admitted notices: report as before
+            # Without the lock an admission may be in flight: fail closed, the invocation stays incomplete.
+            lock = _locked(manifest) if detached else None
             try:
                 if detached:
                     _close_events(manifest, invocation_id)
@@ -905,7 +901,7 @@ def _event_receipt(manifest: dict, event_id: str) -> dict | None:
 def _event_status(manifest: dict, envelope: dict) -> tuple[str, dict | None]:
     receipt = _event_receipt(manifest, envelope["event_id"])
     if receipt is not None:
-        keys = ("binding_id", "binding_revision", "event_id", "invocation_id", "sequence", "submitted_sha256")
+        keys = ("binding_id", "binding_revision", "event_id", "event_kind", "invocation_id", "sequence", "submitted_sha256")
         if not isinstance(receipt, dict) or any(receipt.get(key) != envelope[key] for key in keys):
             return "unknown", receipt
         return receipt.get("state", "unknown"), receipt

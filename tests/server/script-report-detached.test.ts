@@ -665,6 +665,78 @@ describe('appended script report notices', { timeout: 30_000 }, () => {
     expect(shown()).toEqual([['start', 'Packed']])
   })
 
+  it('the frozen admission record is the authority: a malformed or forged spool copy neither loses nor replaces a notice', () => {
+    const binding = bind('launcher.sh')
+    const first = reserve(binding)
+    append(binding, first, 'a:start', 'start', 'original start')
+    m.importer.importScriptReports()
+    // Crash window of an older design: the notice is committed, the event row is gone.
+    m.db.prepare('DELETE FROM script_report_events WHERE binding_id=?').run(binding.binding_id)
+    const second = reserve(binding)
+    append(binding, second, 'b:body', 'body', 'second body')
+    const copy = join(spoolDir(binding), second, 'events', '01.json')
+    writeFileSync(copy, JSON.stringify({ ...JSON.parse(readFileSync(copy, 'utf8')), event_id: 'a:start', content: 'forged' }), { mode: 0o600 })
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'original start'], ['body', 'second body']])
+    // A malformed spool copy before any import: the admitted notice is still delivered, before its terminal report.
+    const third = reserve(binding)
+    append(binding, third, 'c:start', 'start', 'third start')
+    writeFileSync(join(spoolDir(binding), third, 'events', '01.json'), '{"broken"', { mode: 0o600 })
+    complete(binding, third, 'c:final', 'third done')
+    m.importer.importScriptReports()
+    expect(shown().slice(2)).toEqual([['start', 'third start'], ['terminal', 'third done']])
+    expect(eventReceipt(binding, 'c:start')).toMatchObject({ state: 'accepted', sequence: 1, exact: true })
+  })
+
+  it('an unreadable admission record holds its slot and the terminal report instead of discarding the notice', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'd:start', 'start', 'held start')
+    complete(binding, invocation, 'd:final', 'held done')
+    const record = join(m.paths.scriptReportOutboxDir(binding.binding_id), 'invocations', invocation, '01.json')
+    const original = readFileSync(record)
+    writeFileSync(record, '{"broken"', { mode: 0o600 })
+    m.importer.importScriptReports()
+    expect(notices()).toHaveLength(0)
+    expect(spool(binding)).toEqual([invocation])
+    writeFileSync(record, original, { mode: 0o600 })
+    m.importer.importScriptReports()
+    expect(shown()).toEqual([['start', 'held start'], ['terminal', 'held done']])
+  })
+
+  it('a receipt of the same event, bytes and slot but another kind confirms nothing', () => {
+    const binding = bind('launcher.sh')
+    append(binding, reserve(binding), 'k:start', 'start', 'kind check')
+    m.importer.importScriptReports()
+    const path = join(m.paths.scriptReportReceiptsDir(binding.binding_id), 'events', `${sha('k:start')}.json`)
+    writeFileSync(path, JSON.stringify({ ...eventReceipt(binding, 'k:start'), event_kind: 'failure' }))
+    expect(helper(binding, ['receipt', '--stream', 'append', '--event-id', 'k:start'])).toMatchObject({ status: 6, json: { status: 'unknown' } })
+  })
+
+  it('a failing launcher that cannot take the admission lock leaves its invocation open instead of closing it unlocked', () => {
+    writeFileSync(join(hermesHome, 'scripts', 'reports', 'locked.sh'), '#!/bin/bash\necho "boom" >&2\nexit 4\n')
+    const binding = bind('locked.sh')
+    const lock = join(m.paths.scriptReportOutboxDir(binding.binding_id), '.lock')
+    writeFileSync(lock, '', { mode: 0o000 })
+    try {
+      expect(fire(binding).status).toBe(4) // the target's own exit status is preserved
+    } finally {
+      chmodSync(lock, 0o600)
+    }
+    const [invocation] = spool(binding)
+    expect(existsSync(finalOf(binding, invocation))).toBe(false)
+    expect(m.importer.incompleteScriptReports(binding)).toEqual([expect.objectContaining({ invocation_id: invocation })])
+  })
+
+  it('malformed slot names are charged to the import budget', () => {
+    const binding = bind('launcher.sh')
+    const invocation = reserve(binding)
+    append(binding, invocation, 'n:start', 'start', 'budgeted')
+    for (let i = 0; i < 5; i++) writeFileSync(join(spoolDir(binding), invocation, 'events', `junk-${i}`), 'x', { mode: 0o600 })
+    expect(m.importer.importScriptReports({ limit: 2 }).processed).toBe(2)
+    expect(eventFiles(binding, invocation)).toHaveLength(4)
+  })
+
   it('fences: a revoked binding rejects pending notices; without the job reader nothing is imported; sync bindings cannot append', () => {
     const binding = bind('launcher.sh')
     const invocation = reserve(binding)

@@ -342,17 +342,21 @@ worker -> append --event-id E1 --event-kind start ... -> slot 1 of I -> importer
 - **Order and closure.** Studio imports slot `n` only after slot `n-1` is settled, while the
   invocation still runs; its terminal report (and the spool cleanup) waits until every admitted
   slot is settled. The final report counts only if it existed before that pass scanned the slots,
-  and an unreadable `events/` directory holds it back. `complete`, and the wrapper's own failure report, first restore any admitted
-  slot missing from the spool (a crash after its envelope). Only new events are refused after
+  and an unreadable `events/` directory holds it back. `complete`, and the wrapper's own failure report (which leaves the invocation incomplete
+  when it cannot take the helper's lock), first restore any admitted
+  slot missing from the spool (a crash after its record). Only new events are refused after
   closure; a known event keeps answering with its receipt.
 - **Receipt.** `receipts/<binding>/events/<sha256(E)>.json` (`stream: "append"`): binding and
   revision, job, session and generation, invocation, event, kind, slot (`sequence`), `state`,
   reason, `notification_id`, `submitted_sha256`, `accepted_sha256`, `exact` and `record_sha256`.
-  `receipt --stream append --event-id E` reads it; exit codes as above. Studio builds it from its
-  committed event row and stored notice, never from a replayed spool file. The inbox key is the
-  slot (`script-report-event:[binding, revision, invocation, slot]`): a replay with changed bytes
-  or another event id is quarantined, and a notice committed just before a crash is recovered from
-  the inbox rather than accepted twice. The same fences apply as for the
+  `receipt --stream append --event-id E` reads it (a receipt whose event, kind, slot or digest
+  differs from the record answers `unknown`); exit codes as above. Studio settles a slot from the
+  frozen record in `outbox/<binding>/invocations/<I>/<NN>.json` (the spool copy only signals it):
+  an unreadable record holds the slot and the terminal report, and a forged or malformed spool copy
+  changes nothing. It reserves the event for its slot before the inbox sees it, with the inbox key
+  `script-report-event:[binding, revision, invocation, slot]`, so a crash or replay can neither move
+  the event to another slot nor accept it twice; the receipt is built from that row and the stored
+  notice. The same fences apply as for the
   terminal report. The terminal invocation row, receipt and health counts are unchanged, and
   synchronous bindings cannot append.
 - **Retention.** The bound is per invocation, not for the lifetime of a binding: slot records,

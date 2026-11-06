@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'crypto'
 import { basename, dirname, join } from 'path'
 import { isPrivatePersonSession } from '../../contracts/person-session'
 import { studioInstanceId } from '../../public/session-notifications'
-import { scriptReportQuarantineDir, scriptReportReceiptsDir, scriptReportSpoolDir } from '../../public/script-report-paths'
+import { scriptReportOutboxDir, scriptReportQuarantineDir, scriptReportReceiptsDir, scriptReportSpoolDir } from '../../public/script-report-paths'
 import {
   acceptFencedSessionNotification,
   getSessionNotification,
@@ -18,6 +18,7 @@ import {
   listImportableScriptReportBindings,
   recordScriptReportEvent,
   recordScriptReportInvocation,
+  settleScriptReportEvent,
   type ScriptReportEvent,
   type ScriptReportBinding,
   type ScriptReportInvocationState,
@@ -433,10 +434,10 @@ function quarantineEvent(binding: ScriptReportBinding, invocation: string, seque
 }
 
 /**
- * Import the appended notices of one invocation in sequence order, under the same owner fences and
+ * Import the appended notices of one invocation in slot order, under the same owner fences and
  * generation-fenced inbox acceptance as its terminal report. A later notice waits while an earlier
- * slot is neither settled nor present. Returns whether any notice remains: the terminal report and
- * its cleanup wait until every admitted notice is settled.
+ * slot is not settled. Returns whether any notice remains: the terminal report and its cleanup wait
+ * until every admitted notice is settled.
  */
 function importEvents(namespace: string, binding: ScriptReportBinding, invocation: string, dir: string,
   accepted: SessionNotificationRecord[], budget: { left: number }): boolean {
@@ -451,80 +452,81 @@ function importEvents(namespace: string, binding: ScriptReportBinding, invocatio
   names = names.filter(name => !name.startsWith('.')).sort()
   for (const name of names) {
     const file = join(events, name)
-    const slot = EVENT_FILE.exec(name)
-    if (!slot) { quarantineEvent(binding, invocation, 0, file); continue }
     if (budget.left <= 0) return true
+    const slot = EVENT_FILE.exec(name)
+    if (!slot) { budget.left -= 1; quarantineEvent(binding, invocation, 0, file); continue }
     const sequence = Number(slot[1])
-    if (sequence > 1 && !getScriptReportEventAt(binding.binding_id, invocation, sequence - 1)) return true
+    const previous = sequence > 1 ? getScriptReportEventAt(binding.binding_id, invocation, sequence - 1) : null
+    if (sequence > 1 && (!previous || previous.state === 'pending')) return true
     budget.left -= 1
-    const raw = readPrivateFile(file, SCRIPT_REPORT_LIMITS.recordBytes)
-    const event = raw ? parseScriptReportEvent(raw, binding, invocation, sequence) : null
-    const recordSha = raw ? createHash('sha256').update(raw).digest('hex') : null
-    const record = (state: ScriptReportEvent['state'], detail: string | null, notificationId: number | null) => {
-      recordScriptReportEvent({ binding_id: binding.binding_id, binding_revision: binding.revision, event_id: event?.event_id ?? `invalid:${invocation}:${sequence}`,
-        invocation_id: invocation, sequence, event_kind: event?.event_kind ?? null, state, notification_id: notificationId, detail,
-        submitted_sha256: event?.submitted_sha256 ?? null, record_sha256: recordSha })
-      const entry = getScriptReportEventAt(binding.binding_id, invocation, sequence)
-      if (entry) acknowledgeEvent(binding, entry, file, entry.state === 'quarantined')
-    }
-    const key = scriptReportEventProducerKey(binding, invocation, sequence)
-    if (!getScriptReportEventAt(binding.binding_id, invocation, sequence)) {
-      // The inbox committed this slot just before a crash: its notice, not the replayed file, is the record.
-      const committed = getSessionNotification(namespace, binding.profile, key)
-      const original = committed?.payload
-      if (original && typeof original.event_id === 'string') {
-        recordScriptReportEvent({ binding_id: binding.binding_id, binding_revision: binding.revision, event_id: original.event_id,
-          invocation_id: invocation, sequence, event_kind: typeof original.event_kind === 'string' ? original.event_kind : null,
-          state: committed.disposition === 'silent' ? 'silent' : 'accepted', notification_id: committed.id, detail: null,
-          submitted_sha256: typeof original.submitted_sha256 === 'string' ? original.submitted_sha256 : null,
-          record_sha256: typeof original.record_sha256 === 'string' ? original.record_sha256 : null })
-      }
-    }
-    const slotted = getScriptReportEventAt(binding.binding_id, invocation, sequence)
-    if (!event) {
-      if (slotted) acknowledgeEvent(binding, slotted, file, true) // the settled original keeps its disposition and receipt
-      else record('quarantined', 'invalid_report', null)
-      continue
-    }
-    if (slotted) {
-      // A replay completes the original acknowledgement; changed bytes or another event never acquire its disposition.
-      if (slotted.event_id === event.event_id && slotted.record_sha256 === recordSha) acknowledgeEvent(binding, slotted, file, slotted.state === 'quarantined')
-      else acknowledgeEvent(binding, slotted, file, true)
-      continue
-    }
-    if (getScriptReportEvent(binding.binding_id, binding.revision, event.event_id)) { quarantineEvent(binding, invocation, sequence, file); continue }
-    const verdict = ownerVerdict(binding)
-    if (verdict) { record('rejected', verdict, null); continue }
-    const content = sanitizeScriptReportText(event.content)
-    const result = acceptFencedSessionNotification({
-      namespace,
-      profile: binding.profile,
-      producerKey: key,
-      sessionId: binding.session_id,
-      expectedGeneration: binding.session_generation,
-      kind: 'script_report',
-      disposition: 'notified',
-      payload: {
-        source: 'script-report', identity_kind: 'wrapper_invocation', native_execution_id: null,
-        binding_id: binding.binding_id, binding_revision: binding.revision, invocation_id: invocation,
-        job_id: binding.job_id, job_name: binding.job_name, outcome: event.event_kind === 'failure' ? 'failed' : 'output',
-        exit_code: null, signal: null, reason: null, truncated: event.truncated,
-        redaction_status: content !== event.content ? 'redacted' : event.redaction_status,
-        started_at: event.created_at, finished_at: event.created_at, content,
-        completion: 'detached', phase: 'event', event_id: event.event_id, event_kind: event.event_kind, sequence,
-        submitted_sha256: event.submitted_sha256, record_sha256: recordSha,
-        ...(binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch,
-          ...(binding.target_owner !== null ? { owner: binding.target_owner } : {}) } } : {}),
-      },
-    })
-    if (!('record' in result)) {
-      record(result.status === 'conflict' ? 'quarantined' : 'rejected', result.status === 'conflict' ? 'notification_conflict' : 'owner_missing', null)
-    } else {
-      record('accepted', null, result.record.id)
-      if (result.status === 'accepted') accepted.push(result.record)
-    }
+    if (!settleEvent(namespace, binding, invocation, sequence, accepted)) return true
+    const entry = getScriptReportEventAt(binding.binding_id, invocation, sequence)!
+    acknowledgeEvent(binding, entry, file, entry.state === 'quarantined')
   }
   return names.some(name => existsSync(join(events, name)))
+}
+
+/**
+ * Settle one admitted slot; false while it cannot be settled yet (it and the terminal report wait).
+ * The spool copy only signals the slot: the authority is the frozen record the helper admitted under
+ * its lock (`outbox/invocations/<I>/<NN>.json`). The event identity is reserved (`pending`) before the
+ * inbox sees it, so neither a crash nor a replay can attach the event to another slot or accept it twice.
+ */
+function settleEvent(namespace: string, binding: ScriptReportBinding, invocation: string, sequence: number,
+  accepted: SessionNotificationRecord[]): boolean {
+  let row = getScriptReportEventAt(binding.binding_id, invocation, sequence)
+  if (row && row.state !== 'pending') return true
+  const raw = readPrivateFile(join(scriptReportOutboxDir(binding.binding_id), 'invocations', invocation,
+    `${String(sequence).padStart(2, '0')}.json`), SCRIPT_REPORT_LIMITS.recordBytes)
+  if (!raw) return false
+  const event = parseScriptReportEvent(raw, binding, invocation, sequence)
+  const recordSha = createHash('sha256').update(raw).digest('hex')
+  const settle = (state: ScriptReportInvocationState, detail: string | null, notificationId: number | null) => {
+    settleScriptReportEvent(binding.binding_id, invocation, sequence, state, notificationId, detail)
+    return true
+  }
+  if (!row) {
+    if (!event) return false
+    const reserve = (eventId: string, state: ScriptReportEvent['state'], detail: string | null) => recordScriptReportEvent({
+      binding_id: binding.binding_id, binding_revision: binding.revision, event_id: eventId, invocation_id: invocation, sequence,
+      event_kind: event.event_kind, state, notification_id: null, detail, submitted_sha256: event.submitted_sha256, record_sha256: recordSha })
+    // A slot claiming an event admitted elsewhere gets an explicit disposition, never a second acceptance.
+    if (getScriptReportEvent(binding.binding_id, binding.revision, event.event_id)) { reserve(`duplicate:${invocation}:${sequence}`, 'quarantined', 'duplicate_event'); return true }
+    reserve(event.event_id, 'pending', null)
+    row = getScriptReportEventAt(binding.binding_id, invocation, sequence)!
+  }
+  // A notice the inbox committed just before a crash settles its own reserved record, never another one.
+  const key = scriptReportEventProducerKey(binding, invocation, sequence)
+  const committed = getSessionNotification(namespace, binding.profile, key)
+  if (committed) return committed.payload.record_sha256 === row.record_sha256 ? settle('accepted', null, committed.id) : settle('quarantined', 'notification_conflict', null)
+  if (!event || recordSha !== row.record_sha256) return settle('quarantined', 'record_changed', null)
+  const verdict = ownerVerdict(binding)
+  if (verdict) return settle('rejected', verdict, null)
+  const content = sanitizeScriptReportText(event.content)
+  const result = acceptFencedSessionNotification({
+    namespace,
+    profile: binding.profile,
+    producerKey: key,
+    sessionId: binding.session_id,
+    expectedGeneration: binding.session_generation,
+    kind: 'script_report',
+    disposition: 'notified',
+    payload: {
+      source: 'script-report', identity_kind: 'wrapper_invocation', native_execution_id: null,
+      binding_id: binding.binding_id, binding_revision: binding.revision, invocation_id: invocation,
+      job_id: binding.job_id, job_name: binding.job_name, outcome: event.event_kind === 'failure' ? 'failed' : 'output',
+      exit_code: null, signal: null, reason: null, truncated: event.truncated,
+      redaction_status: content !== event.content ? 'redacted' : event.redaction_status,
+      started_at: event.created_at, finished_at: event.created_at, content,
+      completion: 'detached', phase: 'event', event_id: event.event_id, event_kind: event.event_kind, sequence,
+      submitted_sha256: event.submitted_sha256, record_sha256: recordSha,
+      ...(binding.trusted_epoch !== null ? { trusted: { account_id: binding.account_id, epoch: binding.trusted_epoch,
+        ...(binding.target_owner !== null ? { owner: binding.target_owner } : {}) } } : {}),
+    },
+  })
+  if (!('record' in result)) return settle(result.status === 'conflict' ? 'quarantined' : 'rejected', result.status === 'conflict' ? 'notification_conflict' : 'owner_missing', null)
+  if (result.status === 'accepted') accepted.push(result.record)
+  return settle('accepted', null, result.record.id)
 }
 
 /**

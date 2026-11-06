@@ -54,7 +54,8 @@ export interface ScriptReportEvent {
   invocation_id: string
   sequence: number
   event_kind: string | null
-  state: ScriptReportInvocationState
+  /** `pending`: the event identity is reserved for its slot; the inbox may or may not have its notice yet. */
+  state: ScriptReportInvocationState | 'pending'
   notification_id: number | null
   detail: string | null
   submitted_sha256: string | null
@@ -209,7 +210,7 @@ function toEvent(row: Record<string, unknown>): ScriptReportEvent {
   return {
     binding_id: String(row.binding_id), binding_revision: Number(row.binding_revision), event_id: String(row.event_id),
     invocation_id: String(row.invocation_id), sequence: Number(row.sequence), event_kind: text(row.event_kind),
-    state: String(row.state) as ScriptReportInvocationState, notification_id: row.notification_id == null ? null : Number(row.notification_id),
+    state: String(row.state) as ScriptReportEvent['state'], notification_id: row.notification_id == null ? null : Number(row.notification_id),
     detail: text(row.detail), submitted_sha256: text(row.submitted_sha256), record_sha256: text(row.record_sha256), updated_at: Number(row.updated_at),
   }
 }
@@ -233,4 +234,12 @@ export function recordScriptReportEvent(entry: Omit<ScriptReportEvent, 'updated_
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
     .run(entry.binding_id, entry.binding_revision, entry.event_id, entry.invocation_id, entry.sequence, entry.event_kind, entry.state,
       entry.notification_id, entry.detail, entry.submitted_sha256, entry.record_sha256, Date.now())
+}
+
+/** Settle a reserved (`pending`) slot once; a settled disposition is never rewritten. */
+export function settleScriptReportEvent(bindingId: string, invocationId: string, sequence: number,
+  state: ScriptReportInvocationState, notificationId: number | null, detail: string | null): void {
+  database().prepare(`UPDATE script_report_events SET state=?, notification_id=?, detail=?, updated_at=?
+    WHERE binding_id=? AND invocation_id=? AND sequence=? AND state='pending'`)
+    .run(state, notificationId, detail, Date.now(), bindingId, invocationId, sequence)
 }
