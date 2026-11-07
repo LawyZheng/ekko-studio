@@ -692,6 +692,30 @@ describe('trusted current-session automation', () => {
     expect((await list()).body.requests).toEqual([])
   })
 
+  it('adopts an existing script job with the requested detached completion; sync stays the default; an invalid mode is refused unconsumed', async () => {
+    await setPolicy(true)
+    const token = capability()
+    expect((await admit(token, { ...adopt, completion: 'detached', target_session_id: 'chat-2' })).status).toBe(201)
+    const [binding] = bindingRows()
+    expect(binding).toMatchObject({ job_id: 'legacy1', session_id: 'chat-2', completion: 'detached', trusted_epoch: expect.any(String) })
+    // Validated before anything is read or consumed: an unknown mode never reaches the job.
+    expect((await admit(token, { ...adopt, job_id: 'missing-job', completion: 'later' })).body.error).toBe('invalid_completion')
+    expect(bindingRows()).toHaveLength(1)
+    const manifest = JSON.parse(readFileSync(join(studioHome, 'script-reports', 'bindings', binding.binding_id, 'manifest.r1.json'), 'utf8'))
+    expect(manifest).toMatchObject({ completion: 'detached', outbox_dir: expect.any(String), receipts_dir: expect.any(String) })
+    // The login-only dispatch carries the same completion through the trusted admission.
+    let forwarded: any = null
+    m.chatRun.setChatRunServer({ dispatchCurrentSessionCron: async (input: any) => { forwarded = input.arguments.body; return { status: 201, body: {} } } })
+    await call('POST', '/api/hermes/cron/current-session/dispatch', users.member.token, { profile: 'default', session_id: 'chat-1', ...adopt, completion: 'detached' })
+    expect(forwarded).toMatchObject({ completion: 'detached' })
+  })
+
+  it('adopts an existing script job as sync when no completion is requested', async () => {
+    await setPolicy(true)
+    expect((await admit(capability(), adopt)).status).toBe(201)
+    expect(bindingRows().map((row: any) => row.completion)).toEqual(['sync'])
+  })
+
   it('creates an agent job paused, binds it and resumes it; binds an unbound job; never takes over an existing binding', async () => {
     await setPolicy(true)
     const token = capability()
