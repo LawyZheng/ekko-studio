@@ -16,11 +16,13 @@ const execFileAsync = promisify(execFile)
 async function runCase(name: string): Promise<any> {
   const root = mkdtempSync(join(tmpdir(), 'hermes-sn-real-'))
   try {
-    for (const dir of ['home', 'hermes', 'studio', 'pycache']) mkdirSync(join(root, dir), { recursive: true })
+    for (const dir of ['home', 'hermes', 'studio', 'pycache', 'tmp']) mkdirSync(join(root, dir), { recursive: true })
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
       HOME: join(root, 'home'),
       HERMES_HOME: join(root, 'hermes'),
+      // The case gets its own temp directory; nothing it spawns writes to the parent's TMPDIR.
+      TMPDIR: join(root, 'tmp'),
       HERMES_AGENT_ROOT: agentRoot,
       PYTHONDONTWRITEBYTECODE: '1',
       // Reuse the checkout's read-only environment: no per-data-root dependency sync or relaunch.
