@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { initAllHermesTables } from '../../packages/server/src/modules/studio/infrastructure/database/schemas'
 import { clearSessionMessages, createSession, deleteSession, getSessionGeneration } from '../../packages/server/src/modules/studio/repositories/session-store'

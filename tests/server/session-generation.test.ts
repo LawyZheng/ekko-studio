@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 describe('Studio session generation identity', () => {

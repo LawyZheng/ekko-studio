@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+// Vite defines this at build time; the chat store's app-store import reads it on load.
+vi.hoisted(() => { (globalThis as any).__APP_VERSION__ = 'test' })
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 

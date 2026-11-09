@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 

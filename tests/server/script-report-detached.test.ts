@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'

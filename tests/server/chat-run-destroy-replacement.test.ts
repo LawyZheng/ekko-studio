@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

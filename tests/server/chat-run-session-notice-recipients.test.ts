@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as chatRuntime from '../../packages/server/src/modules/studio/public/chat-agent-runtime'
 import { initAllHermesTables } from '../../packages/server/src/modules/studio/infrastructure/database/schemas'

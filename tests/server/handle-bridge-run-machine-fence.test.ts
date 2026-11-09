@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 /**
  * repair-release@1 R2: a terminal machine event re-checks its owner at the final run seam.
  *

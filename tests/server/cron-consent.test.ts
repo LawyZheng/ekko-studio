@@ -1,3 +1,4 @@
+import './fixtures/isolated-studio-state'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
