@@ -1193,6 +1193,9 @@ export class ChatRunSocket {
           }
           const command = parseSessionCommand(data.input)
           if (command && ((!ekkoExecution && isBridgeRunSource(source)) || command.name === 'branch')) {
+            // /destroy may wait a long time on bridge cleanup. Run ownership fences any turn accepted
+            // meanwhile, so that turn does not wait here; every other command keeps its place in order.
+            if (command.name === 'destroy' && !ekkoExecution && isBridgeRunSource(source)) releaseAdmission()
             try {
               const handled = await handleSessionCommand(data.session_id, command, {
                 nsp: this.nsp,

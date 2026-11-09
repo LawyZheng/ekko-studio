@@ -579,3 +579,34 @@ describe('repair@6 direct command turns are owners an outstanding /destroy must 
     expect(chatInputs(bridge)).toEqual(['normal question', machineMessage, '[ASYNC DELEGATION COMPLETE synthetic]'])
   })
 })
+
+describe('only /destroy gives up run admission early', () => {
+  it('an ordinary bridge command (/yolo) paused in the bridge keeps a later turn waiting until the command returns', async () => {
+    syntheticProfiles()
+    const { bridge, release } = fakeBridge()
+    const paused = gate()
+    let reached = false
+    bridge.command.mockImplementation(async (_sessionId: string, command: string) => {
+      if (command === 'yolo') { reached = true; await paused.promise; return { handled: true, enabled: true } }
+      return { handled: false }
+    })
+    const { server } = makeServer(bridge)
+    const { sid } = session()
+    const run = userSocket(server)
+
+    const commanding = run(sid, '/yolo')
+    await vi.waitFor(() => expect(reached).toBe(true))
+    void run(sid, 'later question')
+    await flush()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // Still admitted in order: the later turn has not reached the bridge while /yolo is pending.
+    expect(chatInputs(bridge)).not.toContain('later question')
+
+    paused.open()
+    await commanding
+    await vi.waitFor(() => expect(chatInputs(bridge)).toContain('later question'))
+    release('later question')
+    await vi.waitFor(() => expect(server.sessionMap.get(sid).isWorking).toBe(false))
+    expect(chatInputs(bridge)).toEqual(['later question'])
+  })
+})
