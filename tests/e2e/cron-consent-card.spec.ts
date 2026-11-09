@@ -1,5 +1,32 @@
-import { expect, test } from '@playwright/test'
-import { authenticate, mockExistingHermesChat, TEST_ACCESS_KEY } from './fixtures'
+import { expect, test, type Page } from '@playwright/test'
+import { resolve } from 'node:path'
+import { containPage } from './fixtures/contained-page'
+
+const TEST_ACCESS_KEY = 'playwright-consent-access-key'
+const PIXEL_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2V9sAAAAASUVORK5CYII=', 'base64')
+// API paths the card and theme are expected to call; anything else is reported as unexpected.
+const EXPECTED_API = [/^GET \/api\/theme$/, /^GET \/api\/theme\/background$/, /^GET \/api\/hermes\/cron\/consent-requests$/,
+  /^POST \/api\/hermes\/cron\/consent-requests\/[^/]+\/approve$/]
+
+// Mounts the real consent card in an existing chat with the user's theme; all network is contained.
+async function openConsentCard(page: Page, theme: { brightness?: string; background?: { name: string; mime: string; updatedAt: number } } = {}) {
+  await page.addInitScript(key => {
+    localStorage.setItem('hermes_locale', 'en'); localStorage.setItem('hermes_api_key', key); (window as any).__APP_VERSION__ = 'test'
+  }, TEST_ACCESS_KEY)
+  const settings = { fontSize: 14, textColor: null, accentColor: null, background: null, updatedAt: 1, ...theme }
+  const guard = await containPage(page, path => {
+    if (path === '/api/theme') return settings
+    if (path === '/api/theme/background' && settings.background) return { raw: PIXEL_PNG, contentType: settings.background.mime }
+    return {}
+  })
+  const entry = '/@fs/' + resolve('tests/e2e/fixtures/cron-consent-card.ts').replaceAll('\\', '/').replace(/^\//, '')
+  await page.route('**/__cron_consent__', route => route.fulfill({ contentType: 'text/html',
+    body: `<!doctype html><html><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>` }))
+  return {
+    open: async () => { await page.goto('/__cron_consent__'); await page.waitForFunction(() => !!(window as any).cronConsentFixture) },
+    get unexpectedRequests() { return guard.apiPaths.filter(entry => !EXPECTED_API.some(pattern => pattern.test(entry))) },
+  }
+}
 
 const pending = {
   id: 'req-1', kind: 'script_report_enrollment', mode: 'new', action: 'create_job', profile: 'research',
@@ -13,8 +40,7 @@ for (const brightness of ['light', 'dark'] as const) {
   for (const mobile of [false, true]) {
     test(`cron consent card shows the frozen request as text and approves it (${brightness}, ${mobile ? 'narrow' : 'wide'})`, async ({ page }) => {
       if (mobile) await page.setViewportSize({ width: 390, height: 844 })
-      await authenticate(page, TEST_ACCESS_KEY, 'research')
-      const api = await mockExistingHermesChat(page, { theme: { brightness } })
+      const api = await openConsentCard(page, { brightness })
       let requests = [pending]
       const decisions: Array<{ path: string; body: string | null; authorization?: string }> = []
       await page.route('**/api/hermes/cron/consent-requests?*', route => route.fulfill({ json: { requests } }))
@@ -23,7 +49,7 @@ for (const brightness of ['light', 'dark'] as const) {
         requests = []
         await route.fulfill({ json: { status: 'approved', request_id: 'req-1' } })
       })
-      await page.goto('/#/hermes/chat')
+      await api.open()
       const card = page.getByTestId('cron-consent-card')
       await expect(card).toBeVisible()
       await expect(card).toHaveAttribute('data-theme-surface', 'card')
@@ -47,11 +73,10 @@ for (const brightness of ['light', 'dark'] as const) {
 }
 
 test('cron consent card in the origin chat names a different target chat by title, stable id and profile', async ({ page }) => {
-  await authenticate(page, TEST_ACCESS_KEY, 'research')
-  const api = await mockExistingHermesChat(page)
+  const api = await openConsentCard(page)
   const cross = { ...pending, target: { session_id: 'weekly-target-chat', profile: 'research', title: 'Weekly <b>notes</b>' } }
   await page.route('**/api/hermes/cron/consent-requests?*', route => route.fulfill({ json: { requests: [cross] } }))
-  await page.goto('/#/hermes/chat')
+  await api.open()
   const request = page.getByTestId('cron-consent-card').getByTestId('cron-consent-request')
   await expect(request).toContainText('Create a scheduled script job that reports to the chat named below')
   const target = request.getByTestId('cron-consent-target')
@@ -64,10 +89,9 @@ test('cron consent card in the origin chat names a different target chat by titl
 
 for (const brightness of ['light', 'dark'] as const) {
   test(`cron consent card paints the registered translucent card surface over a wallpaper (${brightness})`, async ({ page }) => {
-    await authenticate(page, TEST_ACCESS_KEY, 'research')
-    const api = await mockExistingHermesChat(page, { theme: { brightness, background: { name: 'wall.png', mime: 'image/png', updatedAt: 1 } } })
+    const api = await openConsentCard(page, { brightness, background: { name: 'wall.png', mime: 'image/png', updatedAt: 1 } })
     await page.route('**/api/hermes/cron/consent-requests?*', route => route.fulfill({ json: { requests: [pending] } }))
-    await page.goto('/#/hermes/chat')
+    await api.open()
     const card = page.getByTestId('cron-consent-card')
     await expect(card.getByTestId('cron-consent-request')).toContainText('reports/digest.py')
     await expect(card).toHaveCSS('background-color', brightness === 'dark' ? 'rgba(42, 42, 42, 0.72)' : 'rgba(255, 255, 255, 0.72)')

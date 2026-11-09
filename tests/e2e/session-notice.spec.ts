@@ -1,24 +1,29 @@
-import { expect, test } from '@playwright/test'
-import { authenticate, mockChatSocket, mockHermesApi } from './fixtures'
+import { expect, test, type Page } from '@playwright/test'
+import { resolve } from 'node:path'
+import { containPage } from './fixtures/contained-page'
+
+// Mounts the real message component with i18n and global styles. Every request outside Vite's own modules is
+// blocked before navigation (see fixtures/contained-page.ts); /api is answered locally and never proxied.
+async function openNotices(page: Page) {
+  await page.addInitScript(() => { localStorage.setItem('hermes_locale', 'en'); (window as any).__APP_VERSION__ = 'test' })
+  const guard = await containPage(page)
+  const entry = '/@fs/' + resolve('tests/e2e/fixtures/session-notice.ts').replaceAll('\\', '/').replace(/^\//, '')
+  await page.route('**/__session_notice__', route => route.fulfill({ contentType: 'text/html',
+    body: `<!doctype html><html><body><div id="app"></div><script type="module" src="${entry}"></script></body></html>` }))
+  await page.goto('/__session_notice__')
+  await page.waitForFunction(() => !!(window as any).sessionNoticeFixture)
+  return guard
+}
 
 for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'narrow', width: 390, height: 844 }]) {
   test(`renders a passive scheduled-task notice in its own session (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height })
-    await authenticate(page)
-    await mockHermesApi(page)
-    await mockChatSocket(page)
-    await page.goto('/#/hermes/chat')
-    await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Schedule a brief')
-    await page.getByRole('button', { name: 'Send' }).click()
-    await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
+    await openNotices(page)
     await page.evaluate(() => {
-      const state = (window as any).__PW_CHAT_SOCKET__
-      const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
-      state.latest.__trigger('run.started', { event: 'run.started', session_id: sid, run_id: 'notice-run' })
-      state.latest.__trigger('run.completed', { event: 'run.completed', session_id: sid, run_id: 'notice-run', output: 'Scheduled.' })
-      state.latest.__trigger('session.notice', {
-        event: 'session.notice', session_id: sid, attention: true,
-        message: {
+      const sid = (window as any).sessionNoticeFixture.sid
+      // Raw server event, delivered through the real socket listener.
+      const add = (message: any) => (window as any).sessionNoticeFixture.deliver({ event: 'session.notice', session_id: sid, attention: true, message })
+      add({
           id: 'studio-notice-1', session_id: sid, role: 'system', display_role: 'system',
           content: 'Synthetic brief result', timestamp: Math.floor(Date.now() / 1000) + 1,
           studio_notice: {
@@ -26,12 +31,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: '
             execution_id: 'exec-1', status: 'completed', success: true, reason: null, error: null,
             truncated: false, finished_at: null,
           },
-        },
-      })
+        })
       // A known failure with an empty answer is shown with its error, not hidden.
-      state.latest.__trigger('session.notice', {
-        event: 'session.notice', session_id: sid, attention: true,
-        message: {
+      add({
           id: 'studio-notice-2', session_id: sid, role: 'system', display_role: 'system',
           content: '', timestamp: Math.floor(Date.now() / 1000) + 2,
           studio_notice: {
@@ -39,8 +41,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: '
             execution_id: 'exec-2', status: 'failed', success: false, reason: null, error: 'Synthetic provider failure',
             truncated: false, finished_at: null,
           },
-        },
-      })
+        })
     })
     const header = page.locator('.studio-notice-header').filter({ hasText: 'Daily brief' })
     await expect(header).toContainText('Scheduled task “Daily brief” finished')
@@ -55,28 +56,18 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: '
 test('renders an external notice as inert plain text with a click-only link', async ({ page }) => {
   const remote: string[] = []
   page.on('request', request => { if (request.url().includes('external.example')) remote.push(request.url()) })
-  await authenticate(page)
-  await mockHermesApi(page)
-  await mockChatSocket(page)
-  await page.goto('/#/hermes/chat')
-  await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Watch the review')
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
+  await openNotices(page)
   const content = '**not bold** ![pixel](https://external.example/pixel.png) <img src="https://external.example/img.png"> [file](/etc/hosts)'
   await page.evaluate(content => {
-    const state = (window as any).__PW_CHAT_SOCKET__
-    const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
-    state.latest.__trigger('run.started', { event: 'run.started', session_id: sid, run_id: 'external-run' })
-    state.latest.__trigger('run.completed', { event: 'run.completed', session_id: sid, run_id: 'external-run', output: 'Watching.' })
-    state.latest.__trigger('session.notice', {
-      event: 'session.notice', session_id: sid, attention: true,
-      message: {
+    const sid = (window as any).sessionNoticeFixture.sid
+    // Raw server event, delivered through the real socket listener.
+      const add = (message: any) => (window as any).sessionNoticeFixture.deliver({ event: 'session.notice', session_id: sid, attention: true, message })
+    add({
         id: 'studio-notice-3', session_id: sid, role: 'system', display_role: 'system', content,
         timestamp: Math.floor(Date.now() / 1000) + 1,
         studio_notice: { kind: 'external', notification_id: 3, source: 'validator-review', event_id: 'review-3',
           title: '<b>Validation</b> complete', url: 'https://external.example/reviews/3' },
-      },
-    })
+      })
   }, content)
   const header = page.locator('.studio-notice-header').filter({ hasText: 'Validation' })
   await expect(header.locator('.studio-notice-title')).toHaveText('<b>Validation</b> complete')
@@ -92,13 +83,7 @@ test('renders an external notice as inert plain text with a click-only link', as
 test('renders a script invocation report as Markdown with its wrapper provenance', async ({ page }) => {
   const remote: string[] = []
   page.on('request', request => { if (request.url().includes('external.example')) remote.push(request.url()) })
-  await authenticate(page)
-  await mockHermesApi(page)
-  await mockChatSocket(page)
-  await page.goto('/#/hermes/chat')
-  await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Watch the digest')
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
+  await openNotices(page)
   const content = [
     '**3 new items** <b>raw</b>',
     '',
@@ -109,20 +94,16 @@ test('renders a script invocation report as Markdown with its wrapper provenance
     '![pixel](https://external.example/pixel.png)',
   ].join('\n')
   await page.evaluate(content => {
-    const state = (window as any).__PW_CHAT_SOCKET__
-    const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
-    state.latest.__trigger('run.started', { event: 'run.started', session_id: sid, run_id: 'script-run' })
-    state.latest.__trigger('run.completed', { event: 'run.completed', session_id: sid, run_id: 'script-run', output: 'Watching.' })
-    state.latest.__trigger('session.notice', {
-      event: 'session.notice', session_id: sid, attention: true,
-      message: {
+    const sid = (window as any).sessionNoticeFixture.sid
+    // Raw server event, delivered through the real socket listener.
+      const add = (message: any) => (window as any).sessionNoticeFixture.deliver({ event: 'session.notice', session_id: sid, attention: true, message })
+    add({
         id: 'studio-notice-4', session_id: sid, role: 'system', display_role: 'system', content,
         timestamp: Math.floor(Date.now() / 1000) + 1,
         studio_notice: { kind: 'script_report', notification_id: 4, disposition: 'notified', identity_kind: 'wrapper_invocation',
           job_id: 'job1', job_name: 'Daily digest', invocation_id: '00000000-0000-4000-8000-000000000004', outcome: 'output',
           exit_code: 0, signal: null, reason: null, truncated: false },
-      },
-    })
+      })
   }, content)
   const header = page.locator('.studio-notice-header').filter({ hasText: 'Daily digest' })
   await expect(header.locator('.studio-notice-title')).toHaveText('Script “Daily digest” reported')
@@ -141,13 +122,7 @@ test('never renders Mermaid or data links from a script report', async ({ page }
   const attempted: string[] = []
   page.on('request', request => { if (new URL(request.url()).hostname === 'external.example') attempted.push(request.url()) })
   await page.route(url => url.hostname === 'external.example', route => route.abort())
-  await authenticate(page)
-  await mockHermesApi(page)
-  await mockChatSocket(page)
-  await page.goto('/#/hermes/chat')
-  await page.getByPlaceholder('Type a message... (Enter to send, Shift+Enter for new line)').fill('Watch the digest')
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.waitForFunction(() => (window as any).__PW_CHAT_SOCKET__?.emitted?.some((entry: any) => entry.event === 'run'))
+  await openNotices(page)
   const report = [
     '### Summary',
     '',
@@ -161,28 +136,21 @@ test('never renders Mermaid or data links from a script report', async ({ page }
   // An agent-backed result with a plain diagram marks when Mermaid rendering has finished.
   const control = ['```mermaid', 'flowchart LR', '  A --> B', '```'].join('\n')
   await page.evaluate(({ report, control }) => {
-    const state = (window as any).__PW_CHAT_SOCKET__
-    const sid = state.emitted.find((entry: any) => entry.event === 'run').payload.session_id
-    state.latest.__trigger('run.started', { event: 'run.started', session_id: sid, run_id: 'script-run' })
-    state.latest.__trigger('run.completed', { event: 'run.completed', session_id: sid, run_id: 'script-run', output: 'Watching.' })
+    const sid = (window as any).sessionNoticeFixture.sid
+    // Raw server event, delivered through the real socket listener.
+      const add = (message: any) => (window as any).sessionNoticeFixture.deliver({ event: 'session.notice', session_id: sid, attention: true, message })
     const now = Math.floor(Date.now() / 1000)
-    state.latest.__trigger('session.notice', {
-      event: 'session.notice', session_id: sid, attention: true,
-      message: {
+    add({
         id: 'studio-notice-5', session_id: sid, role: 'system', display_role: 'system', content: report, timestamp: now + 1,
         studio_notice: { kind: 'script_report', notification_id: 5, disposition: 'notified', identity_kind: 'wrapper_invocation',
           job_id: 'job5', job_name: 'Diagram digest', invocation_id: '00000000-0000-4000-8000-000000000005', outcome: 'output',
           exit_code: 0, signal: null, reason: null, truncated: false },
-      },
-    })
-    state.latest.__trigger('session.notice', {
-      event: 'session.notice', session_id: sid, attention: true,
-      message: {
+      })
+    add({
         id: 'studio-notice-6', session_id: sid, role: 'system', display_role: 'system', content: control, timestamp: now + 2,
         studio_notice: { kind: 'cron', notification_id: 6, disposition: 'notified', job_id: 'job-6', job_name: 'Agent diagram',
           execution_id: 'exec-6', status: 'completed', success: true, reason: null, error: null, truncated: false, finished_at: null },
-      },
-    })
+      })
   }, { report, control })
   const agent = page.locator('.message-bubble').filter({ hasText: 'Agent diagram' })
   await expect(agent.locator('.mermaid-diagram svg')).toBeVisible({ timeout: 20_000 })
