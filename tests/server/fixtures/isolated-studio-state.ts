@@ -7,6 +7,8 @@ import { join } from 'node:path'
 
 const dir = mkdtempSync(join(tmpdir(), 'studio-test-state-'))
 process.env.HERMES_WEB_UI_HOME = dir
+// Test mode keeps the Studio database under the checkout unless this points elsewhere.
+process.env.HERMES_WEB_UI_TEST_DB_DIR = dir
 process.env.HERMES_WEBUI_STATE_DIR = dir
 process.env.UPLOAD_DIR = join(dir, 'upload')
 process.env.HERMES_HOME = join(dir, 'hermes')
