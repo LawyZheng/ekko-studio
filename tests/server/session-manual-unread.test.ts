@@ -154,7 +154,7 @@ describe('manual unread', () => {
     expect(stateOf((await device()).snapshot, 'chat').unreadRevision).toBe(again.unreadRevision)
   })
 
-  it('keeps cursors monotonic: new replies stay unread and a stale receipt cannot clear a newer reply', async () => {
+  it('a receipt for the newest reply under the current unread revision clears the mark and advances the read cursor', async () => {
     const first = assistant('chat')
     const a = await device()
     await read(a.socket, 'chat', first)

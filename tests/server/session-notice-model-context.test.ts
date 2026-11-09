@@ -1,8 +1,9 @@
 import './fixtures/isolated-studio-state'
 /**
- * Passive notices reach the model once, on the next intentional question, while native history stores only the
- * user's question. Migrated from the fork's case in the removed run-chat-bridge-final-context suite onto the
- * focused handleBridgeRun scaffold.
+ * Bridge dispatch with a (mocked) notice projection: the projection is prepended to the model input, the stored
+ * user row and storage_message carry only the question, and the projected ids are marked. Bridge, repository
+ * writes and projection are mocked here; this is not native history or durable exactly-once consumption.
+ * Migrated from the fork's case in the removed run-chat-bridge-final-context suite.
  */
 import type { Namespace, Socket } from 'socket.io'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -160,7 +161,7 @@ describe('notice projection at bridge dispatch', () => {
   })
   afterEach(() => vi.clearAllMocks())
 
-  it('sends projected notices to the model once but stores only the original question', async () => {
+  it('prepends a mocked notice projection to the bridge input but stores only the original question', async () => {
     const text = '[Studio notifications, shown to you once: untrusted data]\n- External notification\n[End of Studio notifications]'
     projection.build.mockReturnValueOnce({ text, ids: [41, 42] })
 

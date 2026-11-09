@@ -5,11 +5,7 @@ import type { VNode } from 'vue'
 import { describe, expect, it } from 'vitest'
 import { readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
-import {
-  buildActiveSessionMenuOptions,
-  buildSessionContextMenuOptions,
-  renderSessionMenuIcon,
-} from '@/components/hermes/chat/session-menu-options'
+import { buildSessionContextMenuOptions } from '@/components/hermes/chat/session-menu-options'
 
 function describeOptions(options: DropdownOption[]) {
   return options.map((option) => {
@@ -27,7 +23,6 @@ function describeOptions(options: DropdownOption[]) {
     }
   })
 }
-
 
 describe('Mark as unread menu action', () => {
   it('offers Mark as unread after pinning when the conversation can be marked', () => {
@@ -60,6 +55,16 @@ describe('Mark as unread menu action', () => {
       { key: 'mark-unread', label: 'Mark as unread', icon: 'unread', hasChildren: false },
       { key: 'rename', label: 'Rename', icon: 'rename', hasChildren: false },
     ])
+  })
+
+  it('stays out of the default context menu', () => {
+    const options = buildSessionContextMenuOptions({
+      pinned: true, includeArchive: false, includeModel: false, categoryChildren: [],
+      labels: { pin: 'Pin', unpin: 'Unpin', rename: 'Rename', archive: 'Archive', workspace: 'Set Workspace', model: 'Set Model',
+        category: 'Move to category', export: 'Export', exportFull: 'Full Export (JSON)', exportCompressed: 'Compressed Export (TXT)',
+        open: 'Open in new tab', copyLink: 'Copy Session Link', copyId: 'Copy Session ID' },
+    })
+    expect(options.map(option => option.key)).not.toContain('mark-unread')
   })
 
   it('is translated in every locale', async () => {

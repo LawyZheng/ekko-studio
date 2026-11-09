@@ -1,8 +1,6 @@
 import './fixtures/isolated-studio-state'
 // Signed token purposes: migrated from the fork's case in the removed user-auth suite.
-import { createHmac } from 'crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 
 describe('migrated fork case', () => {
   let db: any = null
@@ -55,39 +53,6 @@ describe('migrated fork case', () => {
   function jwtPayload(token: string): any {
     return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf-8'))
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   it('marks login and model-run JWTs with distinct signed purposes', async () => {
     const { auth } = await initUsers()

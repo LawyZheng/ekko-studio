@@ -3,11 +3,7 @@
 import type { DropdownOption } from 'naive-ui'
 import type { VNode } from 'vue'
 import { describe, expect, it } from 'vitest'
-import {
-  buildActiveSessionMenuOptions,
-  buildSessionContextMenuOptions,
-  renderSessionMenuIcon,
-} from '@/components/hermes/chat/session-menu-options'
+import { buildActiveSessionMenuOptions } from '@/components/hermes/chat/session-menu-options'
 
 function describeOptions(options: DropdownOption[]) {
   return options.map((option) => {
@@ -25,7 +21,6 @@ function describeOptions(options: DropdownOption[]) {
     }
   })
 }
-
 
 describe('Cron consent setup menu action', () => {
   it('offers the scheduled-result setup action only for sessions that can receive it', () => {

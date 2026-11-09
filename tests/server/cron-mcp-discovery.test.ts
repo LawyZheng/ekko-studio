@@ -7,7 +7,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
-import pkg from '../../package.json'
 
 function writeRpc(child: ChildProcessWithoutNullStreams, id: number, method: string, params?: unknown) {
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
@@ -30,15 +29,6 @@ function waitForRpc(responses: Map<number, any>, id: number): Promise<any> {
   })
 }
 
-function expectProviderSafeToolNames(serverName: string, tools: Array<{ name: string }>) {
-  const safeServerName = serverName.replace(/[^A-Za-z0-9_]/g, '_')
-  const overlongNames = tools
-    .map(tool => `mcp__${safeServerName}__${tool.name}`)
-    .filter(name => name.length > 64)
-  expect(overlongNames).toEqual([])
-}
-
-
 describe('migrated fork case', () => {
   let child: ChildProcessWithoutNullStreams | null = null
   const homes: string[] = []
@@ -48,18 +38,6 @@ describe('migrated fork case', () => {
     child = null
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
-
-
-
-
-
-
-
-
-
-
-
-
 
   it('compact discovery of the generated catalog lists the cron consent request fields, including target_session_id', async () => {
     const openapi = readFileSync(join(process.cwd(), 'docs', 'openapi.json'), 'utf8')
@@ -95,18 +73,6 @@ describe('migrated fork case', () => {
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
 
-
-
-
-
-
-
-
-
-
-
-
-
   it('compact discovery of the generated catalog lists the trusted current-session operation fields', async () => {
     const openapi = readFileSync(join(process.cwd(), 'docs', 'openapi.json'), 'utf8')
     const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(openapi) })
@@ -138,18 +104,6 @@ describe('migrated fork case', () => {
     child = null
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
-
-
-
-
-
-
-
-
-
-
-
-
 
   it('authorizes trusted current-session Cron admission only with the per-call Studio metadata, never a profile token', async () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-web-ui-mcp-'))
@@ -200,18 +154,6 @@ describe('migrated fork case', () => {
     child = null
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
-
-
-
-
-
-
-
-
-
-
-
-
 
   it('default discovery routes a normal agent to trusted admission (with a cross-session target) and explains kinds; consent is the policy-off path', async () => {
     const openapi = readFileSync(join(process.cwd(), 'docs', 'openapi.json'), 'utf8')

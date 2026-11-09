@@ -1,15 +1,7 @@
 import './fixtures/isolated-studio-state'
 // Trusted Cron capability issuance: migrated from the fork's case in the removed handle-bridge-run-drive-root suite.
-/**
- * Agent Bridge runs with a Windows drive root as the workspace.
- *
- * `mkdir('D:', { recursive: true })` fails with EPERM on Windows even though the
- * drive root always exists, which used to abort every run with
- * `EPERM: operation not permitted, mkdir 'D:'` before the agent was ever asked
- * to do anything. The run must reach the bridge instead.
- */
 import type { Namespace, Socket } from 'socket.io'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { handleBridgeRun } from '../../packages/server/src/modules/studio/services/chat-run/handle-bridge-run'
 import type { PrimaryAgentBridgeClient } from '../../packages/server/src/modules/studio/public/chat-agent-runtime'
 import type { ChatMessage } from '../../packages/server/src/modules/studio/services/context-compressor'
@@ -132,10 +124,6 @@ function makeSockets() {
   // Test doubles implement only the socket.io members these run paths touch.
   return { nsp: nsp as unknown as Namespace, socket: socket as unknown as Socket, emitter }
 }
-
-const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
-
-
 
 describe('migrated fork case', () => {
   afterEach(() => vi.clearAllMocks())
