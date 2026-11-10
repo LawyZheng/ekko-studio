@@ -10,6 +10,7 @@ import PinIcon from '@/components/common/PinIcon.vue'
 import { formatTimestampMs } from '@/shared/session-display'
 import { chatSessionAgentAvatar, personAvatarAnimation, personAvatarStyle } from '@/utils/chat-agent-avatar'
 import { resolveSessionNavigation } from './session-list-item-navigation'
+import { sessionAvatarDisplay } from '@/utils/task-lifecycle'
 
 const props = withDefaults(defineProps<{
   session: Session
@@ -19,6 +20,10 @@ const props = withDefaults(defineProps<{
   deleteDisabled?: boolean
   deleteConfirmText?: string
   streaming?: boolean
+  /** `streaming` comes only from background counts (no foreground run); the persisted task state then wins. */
+  backgroundOnly?: boolean
+  /** Durable task lifecycle of the session (server projection), independent of the foreground stream. */
+  taskIndicator?: { kind: 'processing' | 'waiting' | 'attention' | 'open' | 'done'; label: string } | null
   completedUnread?: boolean
   selectable?: boolean
   selected?: boolean
@@ -56,6 +61,7 @@ const profileModelsMissing = computed(() =>
 const isGlobalAgentSession = computed(() => props.session.source === 'global_agent')
 const sessionAgentLogo = computed(() => chatSessionAgentAvatar(props.session))
 const isPersonSession = computed(() => !!personAvatarAnimation(sessionAgentLogo.value, 'idle'))
+const avatarDisplay = computed(() => sessionAvatarDisplay(!!props.streaming, props.taskIndicator, !!props.streaming && !props.backgroundOnly))
 
 let longPressTimer: ReturnType<typeof setTimeout> | null = null
 const longPressTriggered = ref(false)
@@ -151,7 +157,8 @@ onUnmounted(() => {
         <span v-if="showTime" class="session-item-time">{{ formatTimestampMs(session.createdAt) }}</span>
       </span>
       <span class="session-item-agent-row">
-        <span class="session-item-agent-logo-wrap" :class="{ streaming }">
+        <span class="session-item-agent-logo-wrap" :class="[{ streaming: avatarDisplay.ring }, avatarDisplay.badge && `task-${avatarDisplay.badge.kind}`]"
+          :title="avatarDisplay.badge ? t(avatarDisplay.badge.label) : undefined" :data-task-state="avatarDisplay.state" data-testid="session-agent-avatar">
           <img
             class="session-item-agent-logo"
             :class="{ 'session-item-agent-logo--person': isPersonSession }"
@@ -159,6 +166,7 @@ onUnmounted(() => {
             :src="sessionAgentLogo.src"
             :alt="sessionAgentLogo.label"
           >
+          <span v-if="avatarDisplay.badge" class="session-item-task-badge" role="img" :aria-label="t(avatarDisplay.badge.label)" />
         </span>
         <span v-if="props.showProfile" class="session-item-profile">
           <ProfileAvatar class="session-item-profile-avatar" :name="profileName" :avatar="profileAvatar" :size="16" />
@@ -462,6 +470,33 @@ onUnmounted(() => {
   animation: rainbow-glow 4s linear infinite;
 }
 
+.session-item-agent-logo-wrap.task-processing:not(.streaming)::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: 2px dashed var(--accent-primary);
+  border-radius: 50%;
+  animation: session-task-spin 6s linear infinite;
+}
+
+.session-item-task-badge {
+  position: absolute;
+  z-index: 2;
+  right: -3px;
+  bottom: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+}
+
+.task-waiting .session-item-task-badge { background: var(--warning); }
+.task-attention .session-item-task-badge { background: var(--error); }
+.task-done .session-item-task-badge { background: var(--success); }
+.task-open .session-item-task-badge { background: var(--text-muted); }
+
+@keyframes session-task-spin { to { transform: rotate(360deg); } }
+
 .session-item-agent-logo {
   position: relative;
   z-index: 1;
@@ -525,5 +560,6 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .session-item-agent-logo-wrap.streaming::before { animation: none; }
+  .session-item-agent-logo-wrap.task-processing::before { animation: none; }
 }
 </style>

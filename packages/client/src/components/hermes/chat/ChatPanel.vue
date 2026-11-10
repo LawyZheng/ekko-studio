@@ -2595,7 +2595,7 @@ watch([isEmptySingleChat, () => route.fullPath], ([empty]) => {
             :active="s.id === chatStore.activeSessionId"
             :pinned="true"
             can-delete
-            :streaming="sessionStates.isWorking(s.id, chatStore.isSessionWorking(s.id))"
+            :streaming="sessionStates.isWorking(s.id, chatStore.isSessionWorking(s.id))" :task-indicator="sessionStates.taskIndicator(s.id)" :background-only="!sessionStates.isForeground(s.id, chatStore.isSessionLive(s.id))"
             :completed-unread="sessionStates.isUnread(s.id, chatStore.isSessionCompletedUnread(s.id))"
             :selectable="isBatchMode"
             :selected="isSessionSelected(s)"
@@ -2649,7 +2649,7 @@ watch([isEmptySingleChat, () => route.fullPath], ([empty]) => {
               :active="s.id === chatStore.activeSessionId"
               :pinned="Boolean(s.isPinned)"
               can-delete
-              :streaming="sessionStates.isWorking(s.id, chatStore.isSessionWorking(s.id))"
+              :streaming="sessionStates.isWorking(s.id, chatStore.isSessionWorking(s.id))" :task-indicator="sessionStates.taskIndicator(s.id)" :background-only="!sessionStates.isForeground(s.id, chatStore.isSessionLive(s.id))"
               :completed-unread="sessionStates.isUnread(s.id, chatStore.isSessionCompletedUnread(s.id))"
               :selectable="isBatchMode"
               :selected="isSessionSelected(s)"
@@ -2730,7 +2730,7 @@ watch([isEmptySingleChat, () => route.fullPath], ([empty]) => {
               :active="s.id === chatStore.activeSessionId"
               :pinned="false"
               can-delete
-              :streaming="sessionStates.isWorking(s.id, chatStore.isSessionWorking(s.id))"
+              :streaming="sessionStates.isWorking(s.id, chatStore.isSessionWorking(s.id))" :task-indicator="sessionStates.taskIndicator(s.id)" :background-only="!sessionStates.isForeground(s.id, chatStore.isSessionLive(s.id))"
               :completed-unread="sessionStates.isUnread(s.id, chatStore.isSessionCompletedUnread(s.id))"
               :selectable="isBatchMode"
               :selected="isSessionSelected(s)"
