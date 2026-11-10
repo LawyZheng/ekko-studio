@@ -175,7 +175,10 @@ export function acceptFencedSessionNotification(input: {
     if (existing) {
       db.exec('COMMIT')
       const record = rowToRecord(existing)
-      return record.disposition === (input.disposition ?? 'notified') && JSON.stringify(record.payload) === JSON.stringify(input.payload)
+      // A key is bound to its destination too: another session, generation or kind is a conflict.
+      return record.session_id === input.sessionId && record.session_generation === input.expectedGeneration
+        && record.kind === input.kind && record.disposition === (input.disposition ?? 'notified')
+        && JSON.stringify(record.payload) === JSON.stringify(input.payload)
         ? { status: 'duplicate', record } : { status: 'conflict' }
     }
     const disposition = input.disposition ?? 'notified'

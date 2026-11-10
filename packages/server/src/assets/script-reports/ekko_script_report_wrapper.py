@@ -467,8 +467,12 @@ def _exit_like(returncode: int) -> None:
     sys.stderr.flush()
     if returncode < 0:
         sig = -returncode
+        # SIGKILL and SIGSTOP cannot be handled, so resetting their disposition raises; still die by them.
         try:
             signal.signal(sig, signal.SIG_DFL)
+        except (OSError, ValueError):
+            pass
+        try:
             os.kill(os.getpid(), sig)
         except (OSError, ValueError):
             pass

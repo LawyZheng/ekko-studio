@@ -2552,6 +2552,8 @@ export class ChatRunSocket {
    * than the state cached on long-lived sockets.
    */
   publishSessionNotice(record: SessionNotificationRecord) {
+    // Only shown dispositions go live; silent and other recorded-only outcomes never do.
+    if (!['notified', 'status_only', 'unknown'].includes(record.disposition)) return
     // A policy-created notice goes live only while its policy epoch and session generation still hold.
     const trusted = (record.payload as { trusted?: { account_id?: unknown; epoch?: unknown; owner?: unknown } } | undefined)?.trusted
     if (trusted && !(typeof trusted.account_id === 'number' && typeof trusted.epoch === 'string'

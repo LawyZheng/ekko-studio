@@ -1,4 +1,4 @@
-import { getSessionMessageTimestampAtOffset } from '../../repositories/session-store'
+import { getSessionMessageBoundaryAtOffset } from '../../repositories/session-store'
 import {
   listUnprojectedSessionNotifications,
   listVisibleSessionNotifications,
@@ -134,14 +134,24 @@ export function withSessionNotices<T extends { timestamp?: unknown }>(
     return messages
   }
   if (!notices.length) return messages
+  // Boundaries never increase with the offset, so every notice is on exactly one page even when
+  // stored timestamps are not monotonic.
   const upper = page.offset > 0
-    ? getSessionMessageTimestampAtOffset(sessionId, page.offset) ?? Number.POSITIVE_INFINITY
+    ? getSessionMessageBoundaryAtOffset(sessionId, page.offset) ?? Number.POSITIVE_INFINITY
     : Number.POSITIVE_INFINITY
-  const lower = getSessionMessageTimestampAtOffset(sessionId, page.offset + page.storedCount) ?? Number.NEGATIVE_INFINITY
+  const lower = getSessionMessageBoundaryAtOffset(sessionId, page.offset + page.storedCount) ?? Number.NEGATIVE_INFINITY
   const selected = notices.map(noticeToMessage).filter(notice => notice.timestamp > lower && notice.timestamp <= upper)
+    .sort((a, b) => a.timestamp - b.timestamp)
   if (!selected.length) return messages
-  // Stable: a notice sorts after stored rows with the same timestamp.
-  return [...messages, ...selected].sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
+  // Insert each notice before the first newer stored row; stored rows are never reordered, and a
+  // notice goes after stored rows with the same timestamp.
+  const merged: Array<T | StudioNoticeMessage> = []
+  let next = 0
+  for (const message of messages) {
+    while (next < selected.length && selected[next].timestamp < Number(message.timestamp || 0)) merged.push(selected[next++])
+    merged.push(message)
+  }
+  return merged.concat(selected.slice(next))
 }
 
 function clip(text: string, max: number): string {

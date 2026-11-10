@@ -120,6 +120,14 @@ describe('generated script report wrapper', () => {
     expect(final.content).toBe('Script exited with code 3\nstderr:\nboom\nstdout:\n[SILENT]')
   })
 
+  it('dies by an uncatchable signal (SIGKILL) like the target instead of exiting with a code', () => {
+    const { wrapper } = enroll('kill.py', 'import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n')
+    const wrapped = run(wrapper)
+    expect(wrapped.status).toBeNull()
+    expect(wrapped.signal).toBe('SIGKILL')
+    expect(only().final).toMatchObject({ outcome: 'failed', signal: 9, exit_code: null })
+  })
+
   it('reproduces a signal exit instead of a normalized code', () => {
     const { target, wrapper } = enroll('sig.sh', 'echo partial\nkill -TERM $$\n')
     const wrapped = run(wrapper)
