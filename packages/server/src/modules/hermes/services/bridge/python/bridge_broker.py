@@ -313,7 +313,7 @@ class BridgeBroker:
                 "notify_pending": notify_pending,
             }
 
-        if action in {"process_notification_admit", "process_notification_complete", "process_notification_release"}:
+        if action in {"process_notification_admit", "process_notification_complete", "process_notification_release", "process_inspect"}:
             session_id = str(req.get("session_id") or "")
             profile, worker_key = self._route_for_session(
                 session_id,

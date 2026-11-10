@@ -65,6 +65,15 @@ export function getSessionTasks(sessionId: string): SessionTasksSnapshot {
   return { session_id: sessionId, revision: state?.revision || 0, updated_at: state?.updated_at || 0, tasks }
 }
 
+export const LINKED_STATUS_ERROR = 'This goal has a task lifecycle; its status changes only through ekko_studio_task_lifecycle (accept after verified delivery, or rework)'
+
+/** Goals with a task lifecycle: their completion is gated by the lifecycle, never by status writes. */
+export function linkedGoalIds(sessionId: string): Set<string> {
+  const db = getDb()
+  if (!db) return new Set()
+  return new Set((db.prepare(`SELECT id FROM ${SESSION_TASKS_TABLE} WHERE session_id = ? AND lifecycle_json IS NOT NULL`).all(sessionId) as Array<{ id: string }>).map(row => row.id))
+}
+
 const titleKey = (title: string) => title.normalize('NFKC').toLowerCase().replace(/\s+/g, '').trim()
 
 /** Revision checks and upserts commit together. Omitted goals are retained. */
@@ -83,6 +92,7 @@ export function commitSessionTasks(
   const anchor = db.prepare(`SELECT MAX(id) AS id FROM ${MESSAGES_TABLE} WHERE session_id = ?`)
     .get(expected.session_id) as { id: number }
   const previous = getSessionTasks(expected.session_id).tasks
+  const linked = linkedGoalIds(expected.session_id)
   const byId = new Map(previous.map(task => [task.id, task]))
   const byTitle = new Map(previous.map(task => [titleKey(task.title), task]))
   const seen = new Set<string>()
@@ -92,6 +102,7 @@ export function commitSessionTasks(
     const old = change.id ? byId.get(change.id) : byTitle.get(titleKey(change.title))
     if (change.id && !old) throw new Error('Unknown session goal id')
     if (old?.status === 'closed') throw new Error('This goal was closed by the user; only the user can reopen it from the task list')
+    if (old && linked.has(old.id) && change.status !== old.status) throw new Error(LINKED_STATUS_ERROR)
     const sameTitle = byTitle.get(titleKey(change.title))
     if (sameTitle && old && sameTitle.id !== old.id) throw new Error('Goal title belongs to another goal')
     const id = old?.id || randomUUID()

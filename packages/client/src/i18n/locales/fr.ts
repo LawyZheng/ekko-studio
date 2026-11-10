@@ -282,7 +282,8 @@ export default {
     "missingDependency": "Installez d’abord DSH et pnpm.",
   },
   announcements: {"later": "Plus tard", "details": "Voir les détails", "gotIt": "Compris"},
-  taskPlan: {"title": "Plan des tâches", "progress": "{completed}/{total} terminées", "pending": "Non terminé", "in_progress": "En cours", "completed": "Terminé", "running": "Exécution en cours", "ended": "Exécution terminée ; des étapes restent à faire", "interrupted": "Interrompu ; des étapes restent à faire", "failed": "Échec ; des étapes restent à faire"},
+  taskPlan: {"title": "Plan des tâches", "progress": "{completed}/{total} terminées", "pending": "Non terminé", "in_progress": "En cours", "completed": "Terminé", "running": "Exécution en cours", "ended": "Exécution terminée ; des étapes restent à faire", "interrupted": "Interrompu ; des étapes restent à faire", "failed": "Échec ; des étapes restent à faire", "lifecycle": {"running": "En cours", "in_background": "Exécution en arrière-plan", "waiting_login": "En attente de votre connexion", "waiting_consent": "En attente de votre accord", "waiting_decision": "En attente de votre décision", "verifying": "Livré ; vérification en cours", "failed": "Échec de l'exécutant", "lost": "Exécutant perdu", "unknown": "État de l'exécutant inconnu", "open": "Ouverte", "starting": "Démarrage", "done": "Terminé — vérifié et accepté"}},
+  sessionTask: {"waiting_user": "En attente de vous", "running": "Tâche en arrière-plan en cours", "verifying": "Livraison en vérification", "failed": "Tâche échouée", "lost": "Exécutant de la tâche perdu", "unknown": "État de la tâche inconnu", "open": "Tâche ouverte", "done": "Tâche terminée"},
   agentAutoUpdate: { label: 'Mises à jour automatiques' },
   ekkoConfig: {
     "settingsTitle": "Paramètres",

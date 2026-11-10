@@ -14,6 +14,7 @@ import { authorizeSessionShare, authorizeShareFile } from '../services/session-s
 import { sessionShareService } from '../services/session-shares/service'
 import { getSessionTaskPlans } from '../services/task-plans'
 import { getSessionTasks, listSessionTaskItems, setSessionTaskStatus, SessionTasksError } from '../services/session-tasks'
+import { applyTaskAction, TaskLifecycleError } from '../services/task-lifecycle'
 import { historySessionSource, isBuiltinEkkoAgent } from '../contracts/history-source'
 import {
   deleteHermesSessionForProfile,
@@ -1199,6 +1200,37 @@ export function getTasks(ctx: any) {
   }
   if (denySessionAccess(ctx, session)) return
   ctx.body = getSessionTasks(session.id)
+}
+
+/**
+ * PM/user lifecycle decisions (accept, verify, rework, wait/resume, foreground deliver). Only an interactive
+ * login credential qualifies: model-run, run-scoped, App, server, model API key and pre-purpose tokens do not.
+ */
+export function updateTaskLifecycle(ctx: any) {
+  const user = ctx.state?.user
+  if (ctx.get?.('x-studio-run-context') || ctx.state?.credentialKind !== 'login' || ctx.state?.sessionShare || !Number.isSafeInteger(user?.id)) {
+    ctx.status = 403
+    ctx.body = { error: 'Task lifecycle decisions require an interactive login', code: 'login_token_required' }
+    return
+  }
+  const session = localGetSession(ctx.params.id)
+  const profile = explicitProfileFilter(ctx)
+  if (!session || getPendingDeletedSessionIds().has(session.id) || (profile && (session.profile || 'default') !== profile)) {
+    ctx.status = 404
+    ctx.body = { error: 'Session not found' }
+    return
+  }
+  if (denySessionAccess(ctx, session)) return
+  const { action, ...body } = (ctx.request.body || {}) as Record<string, unknown>
+  try {
+    ctx.body = applyTaskAction({ sessionId: session.id, taskId: ctx.params.taskId, actor: { kind: 'pm', account_id: user.id }, action: String(action || ''), body })
+    // Resuming an owned producer shows it running only after an exact observation.
+    if (ctx.body.phase === 'unknown' && ctx.body.owner) void getChatRunServer()?.reconcileTaskProducers()
+  } catch (error) {
+    if (!(error instanceof TaskLifecycleError)) throw error
+    ctx.status = error.status
+    ctx.body = { error: error.message }
+  }
 }
 
 export function updateTaskStatus(ctx: any) {

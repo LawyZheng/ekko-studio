@@ -822,6 +822,11 @@ export class AgentBridgeClient {
     })
   }
 
+  /** Exact ownership query for one Hermes process of one Studio session (task-lifecycle reconciliation). */
+  inspectProcess(ref: { session_id: string; profile: string; process_id: string }): Promise<AgentBridgeResponse & { present?: boolean; exited?: boolean; exit_code?: number | null }> {
+    return this.request({ action: 'process_inspect', ...ref })
+  }
+
   /** Start the fixed, model-free current-session Cron admission; poll `getResult` with the returned run id. */
   studioCronDispatch(profile: string, sessionId: string, capability: string, body: Record<string, unknown>): Promise<AgentBridgeResponse & { run_id: string; status: string }> {
     return this.request<AgentBridgeResponse & { run_id: string; status: string }>({ action: 'studio_cron_dispatch', profile, session_id: sessionId, capability, body })

@@ -121,7 +121,59 @@ export function terminalNotifyRequested(toolName: string, output: string): boole
   }
 }
 
+/** Tools whose result can start an owned background producer. */
+const PRODUCER_TOOLS = new Set(['terminal', 'delegate_task', 'cronjob_manage'])
+
+export interface ProducerTicket { taskId: string; attempt: number }
+
+/** The Studio envelope inside an MCP tool output (plain JSON, `{result}` text or `{content:[{text}]}`). */
+function mcpEnvelope(output: string): Record<string, any> | null {
+  const parse = (text: string) => { try { return JSON.parse(text) } catch { return null } }
+  let value = parse(output)
+  if (!value) { const start = output.indexOf('{'), end = output.lastIndexOf('}'); if (start >= 0 && end > start) value = parse(output.slice(start, end + 1)) }
+  for (let depth = 0; depth < 3 && value && typeof value === 'object'; depth += 1) {
+    const inner = typeof value.result === 'string' ? value.result : Array.isArray(value.content) ? value.content[0]?.text : undefined
+    if (typeof inner !== 'string') break
+    value = parse(inner) ?? value
+    if (value.ok !== undefined) break
+  }
+  return value && typeof value === 'object' ? value : null
+}
+
+/**
+ * Pin the goal attempt from this turn's own lifecycle results as the stream reaches them: a linked card
+ * update (`task_id` + lifecycle attempt) or a lifecycle action result (`task_id` + attempt). Producer tools
+ * later in the stream carry this ticket; an external rework never appears here, so it never re-targets them.
+ */
+export function pinStreamTicket(meta: { streamTicket?: ProducerTicket }, toolName: string, output: string) {
+  const plan = toolName === 'ekko_studio_update_plan' || toolName.endsWith('__ekko_studio_update_plan')
+  const lifecycle = toolName === 'ekko_studio_task_lifecycle' || toolName.endsWith('__ekko_studio_task_lifecycle')
+  if (!plan && !lifecycle) return
+  const result = mcpEnvelope(output)
+  if (!result || result.ok !== true || typeof result.task_id !== 'string') return
+  const attempt = plan ? result.lifecycle?.attempt : result.attempt
+  if (Number.isSafeInteger(attempt)) meta.streamTicket = { taskId: result.task_id, attempt }
+}
+
+/** The owned Hermes process a background `terminal` call started, from its native result JSON. */
+export function terminalProducerOwner(toolName: string, output: string): { kind: 'hermes_process'; id: string; incarnation?: string } | null {
+  if (!terminalNotifyRequested(toolName, output)) return null
+  try {
+    const payload = JSON.parse(output) as Record<string, unknown>
+    const id = typeof payload.session_id === 'string' ? payload.session_id.trim() : ''
+    if (!id) return null
+    return { kind: 'hermes_process', id, ...(payload.pid != null ? { incarnation: String(payload.pid) } : {}) }
+  } catch {
+    return null
+  }
+}
+
 interface BridgeRunMetadata {
+  /** Binds an owned producer started by this turn to the goal attempt its ticket names (task lifecycle). */
+  onProducerSpawn?: (owner: { kind: string; id: string; incarnation?: string }, ticket: ProducerTicket) => void
+  /** Goal attempt pinned by this turn's own update_plan / task_lifecycle results, in bridge event order. */
+  streamTicket?: ProducerTicket
+  producerTickets?: Map<string, ProducerTicket>
   autonomous?: boolean
   delegationId?: string
   queueId?: string
@@ -496,7 +548,7 @@ async function ensureBridgeFixedContext(args: {
 export async function handleBridgeRun(
   nsp: ReturnType<Server['of']>,
   socket: Socket,
-  data: { task_plan_context_id?: string; studio_cron_issue?: () => string | undefined; input: string | ContentBlock[]; display_input?: string | ContentBlock[] | null; display_role?: 'user' | 'command' | 'system'; storage_message?: string; session_id?: string; model?: string; provider?: string; model_groups?: RunModelGroup[]; instructions?: string; workspace?: string | null; category_id?: number | null; source?: string; session_source?: 'global_agent' | 'workflow' | 'group_chat'; queue_id?: string; peerExcludeSocketId?: string; reasoning_effort?: string; push_enabled?: boolean; background_delegation_enabled?: boolean; one_shot_model?: boolean; background_delegation_id?: string; background_claim_id?: string; autonomous?: boolean; run_marker?: string; machine_fence?: () => string | null; on_machine_dispatch?: () => void; on_machine_discard?: (reason: string) => void; onEvent?: (event: string, payload: any) => void },
+  data: { task_plan_context_id?: string; studio_cron_issue?: () => string | undefined; input: string | ContentBlock[]; display_input?: string | ContentBlock[] | null; display_role?: 'user' | 'command' | 'system'; storage_message?: string; session_id?: string; model?: string; provider?: string; model_groups?: RunModelGroup[]; instructions?: string; workspace?: string | null; category_id?: number | null; source?: string; session_source?: 'global_agent' | 'workflow' | 'group_chat'; queue_id?: string; peerExcludeSocketId?: string; reasoning_effort?: string; push_enabled?: boolean; background_delegation_enabled?: boolean; one_shot_model?: boolean; background_delegation_id?: string; background_claim_id?: string; autonomous?: boolean; run_marker?: string; machine_fence?: () => string | null; on_machine_dispatch?: () => void; on_machine_discard?: (reason: string) => void; onEvent?: (event: string, payload: any) => void; on_producer_spawn?: (owner: { kind: string; id: string; incarnation?: string }, ticket: ProducerTicket) => void },
   profile: string,
   sessionMap: Map<string, SessionState>,
   bridge: AgentBridgeClient,
@@ -849,6 +901,8 @@ export async function handleBridgeRun(
       autonomous: data.autonomous === true,
       delegationId: data.background_delegation_id,
       queueId: data.queue_id,
+      onProducerSpawn: data.on_producer_spawn,
+      producerTickets: new Map(),
       backgroundDelegationIds: new Set<string>(),
       originContext: {
         runtime: 'hermes',
@@ -1465,6 +1519,8 @@ async function applyBridgeChunkAsync(
       const toolName = (ev.tool_name as string) || ''
       const args = ev.args as Record<string, unknown> | undefined
       const tool = recordBridgeToolStarted(state, sessionId, runMarker, toolName, args, ev.tool_call_id)
+      // The ticket is the one pinned by this turn's own earlier lifecycle results in the stream, never read at drain time.
+      if (PRODUCER_TOOLS.has(toolName) && runMetadata?.streamTicket) runMetadata.producerTickets?.set(tool.id, { ...runMetadata.streamTicket })
       const payload = {
         event: 'tool.started',
         run_id: chunk.run_id,
@@ -1480,7 +1536,13 @@ async function applyBridgeChunkAsync(
       const toolName = (ev.tool_name as string) || ''
       const completed = recordBridgeToolCompleted(state, sessionId, runMarker, toolName, ev)
       if (terminalNotifyRequested(toolName, completed.output)) state.processNotifyPending = true
+      const ticket = runMetadata?.producerTickets?.get(completed.id)
+      runMetadata?.producerTickets?.delete(completed.id)
+      if (runMetadata) pinStreamTicket(runMetadata, toolName, completed.output)
+      const producer = terminalProducerOwner(toolName, completed.output)
+      if (producer && ticket) runMetadata?.onProducerSpawn?.(producer, ticket)
       const backgroundDelegation = parseBackgroundDelegation(toolName, completed.output)
+      if (backgroundDelegation && ticket) runMetadata?.onProducerSpawn?.({ kind: 'hermes_delegation', id: backgroundDelegation.delegationId }, ticket)
       if (backgroundDelegation) {
         runMetadata?.backgroundDelegationIds.add(backgroundDelegation.delegationId)
         state.backgroundDelegations = state.backgroundDelegations || {}

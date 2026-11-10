@@ -282,7 +282,8 @@ export default {
     "missingDependency": "Zuerst DSH und pnpm installieren.",
   },
   announcements: {"later": "Später", "details": "Details ansehen", "gotIt": "Verstanden"},
-  taskPlan: {"title": "Aufgabenplan", "progress": "{completed}/{total} abgeschlossen", "pending": "Nicht abgeschlossen", "in_progress": "In Bearbeitung", "completed": "Abgeschlossen", "running": "Wird ausgeführt", "ended": "Lauf beendet; Schritte bleiben offen", "interrupted": "Unterbrochen; Schritte bleiben offen", "failed": "Lauf fehlgeschlagen; Schritte bleiben offen"},
+  taskPlan: {"title": "Aufgabenplan", "progress": "{completed}/{total} abgeschlossen", "pending": "Nicht abgeschlossen", "in_progress": "In Bearbeitung", "completed": "Abgeschlossen", "running": "Wird ausgeführt", "ended": "Lauf beendet; Schritte bleiben offen", "interrupted": "Unterbrochen; Schritte bleiben offen", "failed": "Lauf fehlgeschlagen; Schritte bleiben offen", "lifecycle": {"running": "Läuft", "in_background": "Ausführung im Hintergrund", "waiting_login": "Wartet auf Ihre Anmeldung", "waiting_consent": "Wartet auf Ihre Zustimmung", "waiting_decision": "Wartet auf Ihre Entscheidung", "verifying": "Geliefert; wird geprüft", "failed": "Worker fehlgeschlagen", "lost": "Worker-Besitz verloren", "unknown": "Worker-Status unbekannt", "open": "Offen", "starting": "Wird gestartet", "done": "Erledigt — geprüft und abgenommen"}},
+  sessionTask: {"waiting_user": "Wartet auf Sie", "running": "Hintergrundaufgabe läuft", "verifying": "Lieferung wird geprüft", "failed": "Aufgabe fehlgeschlagen", "lost": "Aufgaben-Worker verloren", "unknown": "Aufgabenstatus unbekannt", "open": "Aufgabe offen", "done": "Aufgabe erledigt"},
   agentAutoUpdate: { label: 'Automatische Updates' },
   ekkoConfig: {
     "settingsTitle": "Einstellungen",

@@ -282,7 +282,8 @@ export default {
     "missingDependency": "请先安装 DSH 和 pnpm。",
   },
   announcements: {"later": "稍后", "details": "查看详情", "gotIt": "知道了"},
-  taskPlan: {"title": "任务计划", "progress": "{completed}/{total} 已完成", "pending": "未完成", "in_progress": "进行中", "completed": "已完成", "running": "执行中", "ended": "本次运行已结束，剩余步骤未完成", "interrupted": "已中断，剩余步骤未完成", "failed": "运行失败，剩余步骤未完成"},
+  taskPlan: {"title": "任务计划", "progress": "{completed}/{total} 已完成", "pending": "未完成", "in_progress": "进行中", "completed": "已完成", "running": "执行中", "ended": "本次运行已结束，剩余步骤未完成", "interrupted": "已中断，剩余步骤未完成", "failed": "运行失败，剩余步骤未完成", "lifecycle": {"running": "执行中", "in_background": "后台执行中", "waiting_login": "等待你登录", "waiting_consent": "等待你的同意", "waiting_decision": "等待你的决定", "verifying": "已交付，验证中", "failed": "执行失败", "lost": "执行者已丢失", "unknown": "执行者状态未知", "open": "未完成", "starting": "启动中", "done": "已完成（已验证并验收）"}},
+  sessionTask: {"waiting_user": "等待你处理", "running": "后台任务执行中", "verifying": "交付验证中", "failed": "任务失败", "lost": "任务执行者丢失", "unknown": "任务状态未知", "open": "任务未完成", "done": "任务已完成"},
   agentAutoUpdate: { label: '自动更新' },
   ekkoConfig: {
     "settingsTitle": "设置",

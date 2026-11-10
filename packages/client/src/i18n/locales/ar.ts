@@ -282,7 +282,8 @@ export default {
     "missingDependency": "ثبّت DSH وpnpm أولًا.",
   },
   announcements: {"later": "لاحقًا", "details": "عرض التفاصيل", "gotIt": "فهمت"},
-  taskPlan: {"title": "خطة المهام", "progress": "اكتمل {completed}/{total}", "pending": "غير مكتمل", "in_progress": "قيد التقدم", "completed": "مكتمل", "running": "قيد التنفيذ", "ended": "انتهى التنفيذ؛ توجد خطوات غير مكتملة", "interrupted": "تمت المقاطعة؛ توجد خطوات غير مكتملة", "failed": "فشل التنفيذ؛ توجد خطوات غير مكتملة"},
+  taskPlan: {"title": "خطة المهام", "progress": "اكتمل {completed}/{total}", "pending": "غير مكتمل", "in_progress": "قيد التقدم", "completed": "مكتمل", "running": "قيد التنفيذ", "ended": "انتهى التنفيذ؛ توجد خطوات غير مكتملة", "interrupted": "تمت المقاطعة؛ توجد خطوات غير مكتملة", "failed": "فشل التنفيذ؛ توجد خطوات غير مكتملة", "lifecycle": {"running": "قيد التشغيل", "in_background": "قيد التنفيذ في الخلفية", "waiting_login": "بانتظار تسجيل دخولك", "waiting_consent": "بانتظار موافقتك", "waiting_decision": "بانتظار قرارك", "verifying": "تم التسليم؛ جارٍ التحقق", "failed": "فشل المنفّذ", "lost": "فُقدت ملكية المنفّذ", "unknown": "حالة المنفّذ غير معروفة", "open": "مفتوحة", "starting": "جارٍ البدء", "done": "تم — تم التحقق والقبول"}},
+  sessionTask: {"waiting_user": "بانتظارك", "running": "مهمة خلفية قيد التشغيل", "verifying": "جارٍ التحقق من التسليم", "failed": "فشلت المهمة", "lost": "فُقد منفّذ المهمة", "unknown": "حالة المهمة غير معروفة", "open": "مهمة مفتوحة", "done": "اكتملت المهمة"},
   agentAutoUpdate: { label: 'التحديثات التلقائية' },
   ekkoConfig: {
     "settingsTitle": "الإعدادات",

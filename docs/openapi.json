@@ -24657,6 +24657,62 @@
         ]
       }
     },
+    "/api/studio/sessions/{id}/tasks/{taskId}/lifecycle": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Create lifecycle",
+        "description": "POST /api/studio/sessions/:id/tasks/:taskId/lifecycle",
+        "operationId": "updateTaskLifecycle",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/studio/sessions/{id}/tasks/{taskId}/status": {
       "patch": {
         "tags": [

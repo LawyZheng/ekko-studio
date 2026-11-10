@@ -269,6 +269,8 @@ export interface SessionNoticeEvent {
   message: import('./sessions').HermesMessage & { id: string | number }
 }
 const sessionNoticeHandlers = new Set<(event: SessionNoticeEvent) => void>()
+/** Card updates that arrive outside any run, e.g. a task lifecycle change after the turn ended. */
+const taskPlanHandlers = new Set<(event: RunEvent) => void>()
 const cronConsentHandlers = new Set<(sessionId: string) => void>()
 const unobservedRunStartedHandlers = new Set<(event: RunEvent) => void>()
 const personUpdatedHandlers = new Set<(event: RunEvent) => void>()
@@ -749,6 +751,11 @@ export function onCronConsentUpdated(handler: (sessionId: string) => void): () =
   }
 }
 
+export function onTaskPlanUpdated(handler: (event: RunEvent) => void): () => void {
+  taskPlanHandlers.add(handler)
+  return () => { taskPlanHandlers.delete(handler) }
+}
+
 export function onSessionNotice(handler: (event: SessionNoticeEvent) => void): () => void {
   sessionNoticeHandlers.add(handler)
   return () => {
@@ -933,7 +940,7 @@ export function connectChatRun(requestedProfile?: string | null, transport: Chat
     on('usage.updated', globalUsageUpdatedHandler)
     on('person.updated', event => { for (const handler of personUpdatedHandlers) handler(event) })
     on('run.usage.updated', globalRunUsageUpdatedHandler)
-    on('plan.updated', globalAgentEventHandler)
+    on('plan.updated', (event: any) => { globalAgentEventHandler(event); for (const handler of taskPlanHandlers) handler(event) })
     on('agent.event', globalAgentEventHandler)
     on('run.reattach_failed', globalRunReattachFailedHandler)
     on('session.command', globalSessionCommandHandler)

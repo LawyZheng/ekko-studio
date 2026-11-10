@@ -1,5 +1,5 @@
 import { getSessionTasks as readSessionTasks } from '../repositories/session-task-store'
-import { commitSessionTasks, commitSessionTaskStatus, getSessionTasksState } from '../repositories/session-task-store'
+import { commitSessionTasks, commitSessionTaskStatus, getSessionTasksState, linkedGoalIds, LINKED_STATUS_ERROR } from '../repositories/session-task-store'
 import type { SessionTasksUpdate } from '../contracts/session-task'
 import { publishSessionTaskEvents } from './webhooks'
 export { listSessionTaskItems } from '../repositories/session-task-store'
@@ -68,6 +68,11 @@ export function setSessionTaskStatus(sessionId: string, profile: string, taskId:
   }
   const previous = readSessionTasks(sessionId).tasks
   if (!previous.some(task => task.id === taskId)) throw new SessionTasksError('Session task not found', 404)
+  // The user may still close (and reopen a closed) linked goal; completion and its undo go through the lifecycle.
+  const before = previous.find(task => task.id === taskId)?.status
+  if (linkedGoalIds(sessionId).has(taskId) && before !== status && (status === 'completed' || (before === 'completed' && status === 'open'))) {
+    throw new SessionTasksError(LINKED_STATUS_ERROR, 409)
+  }
   const snapshot = commitSessionTaskStatus(state, taskId, status, expectedUpdatedAt as number)
   if (!snapshot) throw new SessionTasksError('Session task changed; refresh the task list before retrying', 409)
   publishSessionTaskEvents({ profile: state.profile, source: state.source, previous, snapshot })

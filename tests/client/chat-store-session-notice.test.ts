@@ -45,6 +45,7 @@ vi.mock('@/api/studio/chat', () => ({
     return vi.fn()
   }),
   onRunUsageUpdated: vi.fn(() => vi.fn()),
+  onTaskPlanUpdated: vi.fn(() => vi.fn()),
   onSessionNotice: vi.fn((handler: (event: any) => void) => {
     chatApi.sessionNoticeHandlers.push(handler)
     return vi.fn()

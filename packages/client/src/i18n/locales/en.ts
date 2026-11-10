@@ -282,7 +282,8 @@ export default {
     "missingDependency": "Install DSH and pnpm before managing packages.",
   },
   announcements: {"later": "Later", "details": "View details", "gotIt": "Got it"},
-  taskPlan: {"title": "Task plan", "progress": "{completed}/{total} completed", "pending": "Not completed", "in_progress": "In progress", "completed": "Completed", "running": "Running", "ended": "Run ended; unfinished steps remain", "interrupted": "Interrupted; unfinished steps remain", "failed": "Run failed; unfinished steps remain"},
+  taskPlan: {"title": "Task plan", "progress": "{completed}/{total} completed", "pending": "Not completed", "in_progress": "In progress", "completed": "Completed", "running": "Running", "ended": "Run ended; unfinished steps remain", "interrupted": "Interrupted; unfinished steps remain", "failed": "Run failed; unfinished steps remain", "lifecycle": {"running": "Running", "in_background": "Background execution in progress", "waiting_login": "Waiting for you to sign in", "waiting_consent": "Waiting for your consent", "waiting_decision": "Waiting for your decision", "verifying": "Delivered; verifying", "failed": "Worker failed", "lost": "Worker ownership lost", "unknown": "Worker status unknown", "open": "Open", "starting": "Starting", "done": "Done — verified and accepted"}},
+  sessionTask: {"waiting_user": "Waiting for you", "running": "Background task running", "verifying": "Delivery being verified", "failed": "Task failed", "lost": "Task worker lost", "unknown": "Task status unknown", "open": "Task open", "done": "Task done"},
   agentAutoUpdate: { label: 'Automatic updates' },
   ekkoConfig: {
     "settingsTitle": "Settings",

@@ -461,6 +461,7 @@ export async function requireUserJwt(ctx: Context, next: Next): Promise<void> {
     const interaction = ctx.method === 'POST' && (
       ctx.path === '/api/studio/task-plans/update' || ctx.path === '/api/studio/clarifications/request'
       || ctx.path === '/api/studio/session-tasks/list' || ctx.path === '/api/studio/session-tasks/update'
+      || ctx.path === '/api/studio/task-lifecycle/action'
     )
     if (ctx.get('x-studio-run-context') !== binding.contextId
       || profiles.some(value => typeof value !== 'string' || value.trim() !== binding.profile)

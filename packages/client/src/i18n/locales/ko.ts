@@ -282,7 +282,8 @@ export default {
     "missingDependency": "먼저 DSH와 pnpm을 설치하세요.",
   },
   announcements: {"later": "나중에", "details": "자세히 보기", "gotIt": "확인"},
-  taskPlan: {"title": "작업 계획", "progress": "{completed}/{total} 완료", "pending": "미완료", "in_progress": "진행 중", "completed": "완료", "running": "실행 중", "ended": "실행 종료 · 미완료 단계가 있습니다", "interrupted": "중단됨 · 미완료 단계가 있습니다", "failed": "실행 실패 · 미완료 단계가 있습니다"},
+  taskPlan: {"title": "작업 계획", "progress": "{completed}/{total} 완료", "pending": "미완료", "in_progress": "진행 중", "completed": "완료", "running": "실행 중", "ended": "실행 종료 · 미완료 단계가 있습니다", "interrupted": "중단됨 · 미완료 단계가 있습니다", "failed": "실행 실패 · 미완료 단계가 있습니다", "lifecycle": {"running": "실행 중", "in_background": "백그라운드에서 실행 중", "waiting_login": "로그인을 기다리는 중", "waiting_consent": "동의를 기다리는 중", "waiting_decision": "결정을 기다리는 중", "verifying": "전달됨, 검증 중", "failed": "작업자 실패", "lost": "작업자 소유권 상실", "unknown": "작업자 상태 알 수 없음", "open": "미완료", "starting": "시작 중", "done": "완료 — 검증 및 승인됨"}},
+  sessionTask: {"waiting_user": "사용자 응답 대기", "running": "백그라운드 작업 실행 중", "verifying": "전달물 검증 중", "failed": "작업 실패", "lost": "작업자 상실", "unknown": "작업 상태 알 수 없음", "open": "미완료 작업", "done": "작업 완료"},
   agentAutoUpdate: { label: '자동 업데이트' },
   ekkoConfig: {
     "settingsTitle": "설정",

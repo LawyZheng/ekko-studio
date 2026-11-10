@@ -282,7 +282,8 @@ export default {
     "missingDependency": "先に DSH と pnpm をインストールしてください。",
   },
   announcements: {"later": "後で", "details": "詳細を見る", "gotIt": "確認しました"},
-  taskPlan: {"title": "タスク計画", "progress": "{completed}/{total} 完了", "pending": "未完了", "in_progress": "進行中", "completed": "完了", "running": "実行中", "ended": "実行終了・未完了の手順があります", "interrupted": "中断・未完了の手順があります", "failed": "実行失敗・未完了の手順があります"},
+  taskPlan: {"title": "タスク計画", "progress": "{completed}/{total} 完了", "pending": "未完了", "in_progress": "進行中", "completed": "完了", "running": "実行中", "ended": "実行終了・未完了の手順があります", "interrupted": "中断・未完了の手順があります", "failed": "実行失敗・未完了の手順があります", "lifecycle": {"running": "実行中", "in_background": "バックグラウンドで実行中", "waiting_login": "サインインを待っています", "waiting_consent": "同意を待っています", "waiting_decision": "判断を待っています", "verifying": "納品済み・検証中", "failed": "実行に失敗しました", "lost": "実行者を見失いました", "unknown": "実行者の状態が不明です", "open": "未完了", "starting": "開始中", "done": "完了（検証・承認済み）"}},
+  sessionTask: {"waiting_user": "あなたの対応待ち", "running": "バックグラウンドタスク実行中", "verifying": "納品を検証中", "failed": "タスク失敗", "lost": "タスクの実行者を見失いました", "unknown": "タスクの状態不明", "open": "未完了のタスク", "done": "タスク完了"},
   agentAutoUpdate: { label: '自動更新' },
   ekkoConfig: {
     "settingsTitle": "設定",

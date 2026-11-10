@@ -110,6 +110,8 @@ export const SESSION_TASKS_SCHEMA: Record<string, string> = {
   requirements_json: "TEXT NOT NULL DEFAULT '{}'",
   selection_json: "TEXT NOT NULL DEFAULT '{}'",
   workspace: "TEXT NOT NULL DEFAULT ''",
+  /** Versioned task lifecycle (see docs/task-lifecycle.md). NULL keeps the legacy goal behavior. */
+  lifecycle_json: 'TEXT',
 }
 export const TASK_PLANS_SCHEMA: Record<string, string> = {
   session_id: 'TEXT NOT NULL',
