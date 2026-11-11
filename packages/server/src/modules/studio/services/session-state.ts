@@ -2,6 +2,7 @@ import type { Socket } from 'socket.io'
 import type { AuthenticatedUser } from '../public/auth'
 import { logger } from '../public/logging'
 import { listSessionStateRecords, markSessionRead, markSessionUnread, type SessionStateRecord } from '../repositories/session-state-store'
+import { projectSessionTaskStates } from './task-lifecycle'
 import type { SessionListState } from '../../../../../shared/session-state'
 
 interface RuntimeState { working: boolean; backgroundPending: number; collaborationPending?: number }
@@ -25,20 +26,26 @@ export class SessionStateSync {
   }
 
   private states(user: AuthenticatedUser, sessionId?: string): SessionListState[] {
-    return listSessionStateRecords(user.id, sessionId).filter(session => this.allowed(user, session)).map(session => {
+    const records = listSessionStateRecords(user.id, sessionId).filter(session => this.allowed(user, session))
+    let tasks: ReturnType<typeof projectSessionTaskStates> = new Map()
+    // The task summary is additive: read/unread state must stay available even if it cannot be read.
+    try { tasks = projectSessionTaskStates(records.map(session => session.id)) } catch (error) { logger.warn(error, '[session-state] task lifecycle unavailable') }
+    return records.map(session => {
       const runtime = this.runtime(session.id)
+      const task = tasks.get(session.id)
       const backgroundPending = this.pending.get(session.id) ?? runtime.backgroundPending
       // Person main turns are owned by the chat host. A missed terminal event
       // must not keep a settled host alive in subsequent list snapshots.
       const foreground = session.id.startsWith('person-main-') && !runtime.working
         ? false : this.foreground.get(session.id) ?? runtime.working
       const working = foreground || backgroundPending > 0 || (runtime.collaborationPending || 0) > 0
-      return { sessionId: session.id, profile: session.profile || 'default', working,
+      return { sessionId: session.id, profile: session.profile || 'default', working, foreground,
         backgroundPending, lastMessageId: session.lastMessageId, readMessageId: session.readMessageId,
         lastAttentionId: session.lastAttentionId, readAttentionId: session.readAttentionId,
         manualUnread: !!session.manualUnread, unreadRevision: session.unreadRevision, generation: session.generation,
         unread: !working && (!!session.manualUnread || session.lastMessageId > session.readMessageId
-          || session.lastAttentionId > session.readAttentionId) }
+          || session.lastAttentionId > session.readAttentionId),
+        ...(task ? { task } : {}) }
     })
   }
 

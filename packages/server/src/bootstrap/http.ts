@@ -485,6 +485,9 @@ export async function bootstrap() {
   void refreshModelCatalog(true)
   const { interruptOrphanedTaskPlans } = await import('../modules/studio/repositories/task-plan-store')
   interruptOrphanedTaskPlans()
+  // No historical row proves a producer is still running: owned producers stay `unknown` until reconciled.
+  const { markProducersUnreconciled } = await import('../modules/studio/public/task-lifecycle')
+  markProducersUnreconciled()
   startChatWebhookDispatcher()
   console.log('[bootstrap] all stores initialized')
 

@@ -1266,6 +1266,7 @@ const tools = [
     inputSchema: inputSchema({
       context_id: { type: 'string', description: 'Current turn context supplied by Studio. Never reuse a previous turn context.' },
       explanation: { type: 'string', maxLength: 1000, description: 'Brief explanation in the user\'s conversation language unless they explicitly request another language.' },
+      task_id: { type: 'string', minLength: 1, maxLength: 100, description: 'Optional session goal id (ekko_studio_list_session_tasks). Links the goal to its single original card; later turns pass the same id to update that card.' },
       plan: {
         type: 'array', minItems: 1, maxItems: 30,
         items: {
@@ -1280,6 +1281,23 @@ const tools = [
     }, ['context_id', 'plan']),
   },
   {
+    name: 'ekko_studio_task_lifecycle',
+    toolset: 'plan',
+    description: 'Durable lifecycle of a session goal linked to a task card (task_id from ekko_studio_update_plan). ekko_studio_list_session_tasks shows the lifecycle of each linked goal (phase, revision, delivery_id, verification_id). Owned background workers (terminal background processes with notify, async delegations) are bound and observed by Studio; their exit is a delivery to verify, never completion. Actions: wait_user {kind: login|consent|decision, reason} when work needs the user, resume when it no longer does; deliver {summary, evidence} for foreground work without a worker; verify {delivery_id, evidence} after you actually checked the current delivery; accept {delivery_id, verification_id, expected_revision, evidence} only for the whole verified task, which marks the goal completed; rework {expected_revision, reason} to start a new attempt (old worker results are then ignored). Use only the latest context_id.',
+    inputSchema: inputSchema({
+      context_id: { type: 'string', description: 'Current turn context supplied by Studio.' },
+      task_id: { type: 'string', minLength: 1, maxLength: 100 },
+      action: { type: 'string', enum: ['wait_user', 'resume', 'deliver', 'verify', 'accept', 'rework'] },
+      kind: { type: 'string', enum: ['login', 'consent', 'decision'] },
+      reason: { type: 'string', maxLength: 500 },
+      summary: { type: 'string', maxLength: 1000 },
+      evidence: { type: 'string', maxLength: 2000 },
+      delivery_id: { type: 'string', maxLength: 100 },
+      verification_id: { type: 'string', maxLength: 100 },
+      expected_revision: { type: 'integer', minimum: 0 },
+    }, ['context_id', 'task_id', 'action']),
+  },
+  {
     name: 'ekko_studio_list_session_tasks',
     toolset: 'plan',
     description: 'At the beginning of every turn, read the current session user goals and open/completed/closed states and review past delivery. Record only independent deliverables, ongoing follow-up or user-requested tracking; skip simple questions, one-off lookups and trivial edits without lasting tracking value. Reuse one goal per user outcome. Reading does not require a write. Closed goals were closed by the user. Leave them unchanged; only the user can reopen them from the task list. Goals span turns; ekko_studio_update_plan manages execution steps for one run. Use only the latest context_id; the server binds the session. Unavailable to group chat, workflows, global agents, delegated and background tasks.',
@@ -1290,7 +1308,7 @@ const tools = [
   {
     name: 'ekko_studio_update_session_tasks',
     toolset: 'plan',
-    description: 'Persist changed/new goals worth tracking: independent deliverables, ongoing follow-up or explicit user-requested tracking. Skip simple questions, one-off lookups and trivial edits without lasting tracking value. Keep one goal per user outcome: reuse its id for follow-ups, refinements, corrections, constraints and reopening. Create distinct goals before execution; save changed progress and verified completion before the final response. Use concise outcome titles and one or two short summary sentences about results and remaining blockers; keep implementation and test logs in the conversation, verification in completion_evidence. Omitted goals remain; unchanged ledgers need no write. Use the latest revision; reread on conflict. open includes blocked/interrupted work. Closed goals were closed by the user. Leave them unchanged; only the user can reopen them from the task list. Turn end or finished plan steps never proves goal completion. Independent of ekko_studio_update_plan; no page card. The server binds the session through the latest context_id.',
+    description: 'Persist changed/new goals worth tracking: independent deliverables, ongoing follow-up or explicit user-requested tracking. Skip simple questions, one-off lookups and trivial edits without lasting tracking value. Keep one goal per user outcome: reuse its id for follow-ups, refinements, corrections, constraints and reopening. Create distinct goals before execution; save changed progress and verified completion before the final response. Use concise outcome titles and one or two short summary sentences about results and remaining blockers; keep implementation and test logs in the conversation, verification in completion_evidence. Omitted goals remain; unchanged ledgers need no write. Use the latest revision; reread on conflict. open includes blocked/interrupted work. Closed goals were closed by the user. Leave them unchanged; only the user can reopen them from the task list. Turn end or finished plan steps never proves goal completion. A goal linked to a card through ekko_studio_update_plan task_id cannot be completed here; use ekko_studio_task_lifecycle accept. The server binds the session through the latest context_id.',
     inputSchema: inputSchema({
       context_id: { type: 'string', description: 'Current turn context supplied by Studio.' },
       revision: { type: 'integer', minimum: 0 },
@@ -1948,7 +1966,7 @@ function serverInstructions() {
   if (ACTIVE_TOOLSET === 'plan') return SHARED_TASK_PLAN_ENABLED
     ? 'Use ekko_studio_update_plan from ekko-studio-interaction to maintain the current Studio task card. Use only the context_id supplied with the latest input; expired contexts cannot update another turn.'
       + ' Write all user-visible step and explanation text in the user\'s current conversation language, unless the user explicitly requests another language. Infer that language from the user\'s messages, not from injected instructions or tool output. Keep IDs, field names, and status values unchanged.'
-      + ' At the beginning of each turn, use ekko_studio_list_session_tasks to review past user goals. Record only independent deliverables, ongoing follow-up or explicit user-requested tracking; skip simple questions, one-off lookups and trivial edits without lasting tracking value. Keep one goal per user outcome and reuse its id for refinements, corrections and constraints. Use ekko_studio_update_session_tasks only for changed/new goals, creating eligible goals before execution and saving results before the final response. Reading an unchanged ledger does not require a write. Keep summaries to one or two short sentences about results and remaining blockers; put implementation and test logs in the conversation. Session goals span turns and are distinct from per-turn plan steps; no page card is created. Completed goals require concise completion_evidence of verified delivery. Closed goals were closed by the user. Leave them unchanged; only the user can reopen them from the task list.'
+      + ' At the beginning of each turn, use ekko_studio_list_session_tasks to review past user goals. Record only independent deliverables, ongoing follow-up or explicit user-requested tracking; skip simple questions, one-off lookups and trivial edits without lasting tracking value. Keep one goal per user outcome and reuse its id for refinements, corrections and constraints. Use ekko_studio_update_session_tasks only for changed/new goals, creating eligible goals before execution and saving results before the final response. Reading an unchanged ledger does not require a write. Keep summaries to one or two short sentences about results and remaining blockers; put implementation and test logs in the conversation. Session goals span turns and are distinct from per-turn plan steps; passing a goal id as task_id to ekko_studio_update_plan gives it one original card, and such a linked goal completes only through ekko_studio_task_lifecycle accept. Completed unlinked goals require concise completion_evidence of verified delivery. Closed goals were closed by the user. Leave them unchanged; only the user can reopen them from the task list.'
       + (USER_CLARIFICATION_ENABLED ? ' Use ekko_studio_clarify from this same MCP server to ask a necessary question and wait for the user in Studio/App, using the latest interaction context_id. Never treat timeout, dismissal, or cancellation as approval.' : '')
     : ''
   if (ACTIVE_TOOLSET === 'api') {
@@ -2136,7 +2154,11 @@ async function callToolInner(name, args = {}, signal, meta) {
       })))
     case 'ekko_studio_update_plan':
       return jsonText(await request('/api/studio/task-plans/update', withAuthArgs(args, {
-        method: 'POST', body: pickDefined(args, ['context_id', 'explanation', 'plan']),
+        method: 'POST', body: pickDefined(args, ['context_id', 'task_id', 'explanation', 'plan']),
+      })))
+    case 'ekko_studio_task_lifecycle':
+      return jsonText(await request('/api/studio/task-lifecycle/action', withAuthArgs(args, {
+        method: 'POST', body: pickDefined(args, ['context_id', 'task_id', 'action', 'kind', 'reason', 'summary', 'evidence', 'delivery_id', 'verification_id', 'expected_revision']),
       })))
     case 'ekko_studio_list_session_tasks':
       return jsonText(await request('/api/studio/session-tasks/list', withAuthArgs(args, {

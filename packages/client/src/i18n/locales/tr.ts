@@ -327,7 +327,9 @@ export default {
     ended: 'Çalışma sona erdi; tamamlanmamış adımlar var',
     interrupted: 'Kesildi; tamamlanmamış adımlar var',
     failed: 'Çalışma başarısız oldu; tamamlanmamış adımlar var',
+    lifecycle: {"running": "Çalışıyor", "in_background": "Arka planda yürütülüyor", "waiting_login": "Oturum açmanız bekleniyor", "waiting_consent": "Onayınız bekleniyor", "waiting_decision": "Kararınız bekleniyor", "verifying": "Teslim edildi; doğrulanıyor", "failed": "Çalıştırıcı başarısız oldu", "lost": "Çalıştırıcı sahipliği kayboldu", "unknown": "Çalıştırıcı durumu bilinmiyor", "open": "Açık", "starting": "Başlatılıyor", "done": "Bitti — doğrulandı ve kabul edildi"},
   },
+  sessionTask: {"waiting_user": "Sizi bekliyor", "running": "Arka plan görevi çalışıyor", "verifying": "Teslim doğrulanıyor", "failed": "Görev başarısız", "lost": "Görev çalıştırıcısı kayboldu", "unknown": "Görev durumu bilinmiyor", "open": "Görev açık", "done": "Görev bitti"},
   agentAutoUpdate: { label: 'Otomatik güncellemeler' },
 
   browser: {

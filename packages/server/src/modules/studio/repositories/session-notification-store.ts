@@ -213,6 +213,13 @@ export function getSessionNotification(namespace: string, profile: string, produ
   return row ? rowToRecord(row) : null
 }
 
+/** Latest accepted completion receipt of one Hermes process in one session (task-lifecycle recovery). */
+export function findProcessCompletion(sessionId: string, processId: string): SessionNotificationRecord | null {
+  const row = database().prepare(`SELECT * FROM session_notifications WHERE session_id=? AND kind='process_completion'
+    AND json_extract(payload, '$.process_id')=? ORDER BY id DESC LIMIT 1`).get(sessionId, processId) as Record<string, unknown> | undefined
+  return row ? rowToRecord(row) : null
+}
+
 /** Move a row forward from an expected disposition; returns false when another writer won. */
 export function transitionSessionNotification(id: number, from: SessionNotificationDisposition, to: SessionNotificationDisposition): boolean {
   const result = database().prepare('UPDATE session_notifications SET disposition=?, updated_at=? WHERE id=? AND disposition=?')

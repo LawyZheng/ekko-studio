@@ -37,13 +37,16 @@ import { bindRunPushTarget, type PushRunRef, getRunPushTarget } from '../reposit
 import { ClarificationRuns } from '../services/clarification-runs'
 import { TaskPlanRuns, taskPlanRunInstruction } from '../services/task-plan-runs'
 import { runMcpCredentials } from '../services/auth/run-mcp-credentials'
-import { saveTaskPlan } from '../repositories/task-plan-store'
+import { applyTaskAction, commitTaskPlanSnapshot, getTaskLifecycle, listActiveProducers, onTaskLifecycleChanged, projectLifecycle, taskProducers } from '../services/task-lifecycle'
+import type { TaskProducerOwner } from '../contracts/session-task'
+
 import { getSessionTasks, updateSessionTasks, SessionTasksError } from '../services/session-tasks'
 import { getSessionTaskPlans } from '../services/task-plans'
 import { observeCronBindings, targetOwnerCurrent } from '../services/session-notifications/cron-observer'
 import { noticeToMessage, withSessionNotices } from '../services/session-notifications/presentation'
 import {
   acceptSessionNotification,
+  findProcessCompletion,
   settleInterruptedProcessAdmissions,
   transitionSessionNotification,
   type SessionNotificationDisposition,
@@ -89,7 +92,7 @@ import {
   respondToChatEkkoClarification as respondToEkkoClarification,
   respondToChatEkkoToolApproval as respondToEkkoToolApproval,
 } from '../public/chat-agent-runtime'
-import { handleBridgeRun, resumeBridgeRun } from '../services/chat-run/handle-bridge-run'
+import { type ProducerTicket, handleBridgeRun, resumeBridgeRun } from '../services/chat-run/handle-bridge-run'
 import { handleCodingAgentRun } from '../services/chat-run/handle-coding-agent-run'
 import { handleEkkoAgentRun, type EkkoAgentRunSocketData } from '../services/chat-run/handle-ekko-agent-run'
 import { handleEkkoSessionCommand, parseEkkoRunCommand } from '../services/chat-run/ekko-session-command'
@@ -473,7 +476,7 @@ export class ChatRunSocket {
   private readonly runAdmissions = new Map<string, Promise<void>>()
   private readonly ekkoExecutions = new Map<string, symbol>()
   private hermesQueueInsertionOperations = new Map<string, Promise<void>>()
-  private readonly taskPlanRuns = new TaskPlanRuns(saveTaskPlan, (sessionId, snapshot) => {
+  private readonly taskPlanRuns = new TaskPlanRuns(commitTaskPlanSnapshot, (sessionId, snapshot) => {
     this.emitExternalEvent(sessionId, 'plan.updated', { event: 'plan.updated', ...snapshot })
   })
   private readonly clarificationRuns = new ClarificationRuns((sessionId, event, payload) => {
@@ -498,6 +501,11 @@ export class ChatRunSocket {
   private closing = false
   private stopUsageUpdates: () => void
   private stopPersonUpdates: () => void
+  private stopTaskLifecycleUpdates: () => void
+  /** Owned Hermes producers exist (persisted); keeps the background poll alive for their completion. */
+  private ownedProducersActive = false
+  private producersNeedReconcile = false
+  private lastProducerReconcile = 0
   private personQuestions = new Map<string, ReturnType<typeof personChatInteraction>>()
   private readonly sessionStateSync: SessionStateSync
 
@@ -513,6 +521,13 @@ export class ChatRunSocket {
     }, (user, profile) => this.canAccessProfile(user, profile),
     (user, profile) => profile == null ? findUserById(user.id)?.status === 'active' : this.currentAccountAllowed(user, profile))
     this.stopPersonUpdates = onPersonUpdated(userId => this.syncPersonInteraction(userId))
+    // Committed lifecycle changes update the ORIGINAL card in place and the session's avatar projection.
+    this.stopTaskLifecycleUpdates = onTaskLifecycleChanged((sessionId, card) => {
+      if (this.closing) return
+      if (card) this.nsp.to(`session:${sessionId}`).emit('plan.updated', { event: 'plan.updated', ...card })
+      this.ownedProducersActive = listActiveProducers().some(item => item.owner.kind.startsWith('hermes_'))
+      this.sessionStateSync.publish(sessionId)
+    })
     this.stopUsageUpdates = onRunUsageUpdated((sessionId, summary) => {
       const session = getSession(sessionId)
       const isCoding = session && session.agent !== 'ekko-agent' && (session.source === 'coding_agent'
@@ -575,6 +590,93 @@ export class ChatRunSocket {
     return this.taskPlanRuns.update(contextId, profile, input)
   }
 
+  /** A live Hermes turn acts on a goal of its own session (MCP ekko_studio_task_lifecycle). */
+  taskLifecycleAction(contextId: string, profile: string, input: Record<string, unknown>) {
+    const sessionId = this.sessionTasksContext(contextId, profile)
+    const state = this.sessionMap.get(sessionId)
+    const runId = state?.activeRunMarker || state?.responseRun?.runMarker || state?.runId || contextId
+    const { context_id: _context, task_id: taskId, action, ...body } = input
+    const result = applyTaskAction({ sessionId, taskId: String(taskId || ''), actor: { kind: 'hermes', run_id: runId }, action: String(action || ''), body })
+    if (result.phase === 'unknown' && result.owner) void this.reconcileTaskProducers()
+    return result
+  }
+
+  /**
+   * Owned producer observed in this turn's tool result (Hermes terminal process or async delegation). It binds
+   * only to the exact goal attempt its stream ticket names; a rework since then makes it stale.
+   */
+  observeProducerSpawn(sessionId: string, ticket: ProducerTicket | undefined, owner: TaskProducerOwner) {
+    if (!ticket) return
+    try {
+      taskProducers.start({ sessionId, taskId: ticket.taskId, attempt: ticket.attempt, owner, eventId: `spawn:${owner.kind}:${owner.id}` })
+    } catch (err) {
+      logger.warn(err, '[chat-run-socket] producer %s:%s was not bound to goal %s attempt %d', owner.kind, owner.id, ticket.taskId, ticket.attempt)
+    }
+  }
+
+  /** A native completion of an owned producer: success is a delivery to verify, never acceptance. */
+  private producerFinished(sessionId: string, owner: TaskProducerOwner, eventId: string, outcome: { ok: boolean; ref: string; summary: string }): boolean {
+    try {
+      if (outcome.ok) taskProducers.deliver({ sessionId, owner, eventId, result: { ref: outcome.ref, summary: outcome.summary } })
+      else taskProducers.fail({ sessionId, owner, eventId, reason: outcome.summary })
+      return true
+    } catch (err) {
+      // Retried idempotently from the stored notification receipt (replay or reconciliation).
+      logger.warn(err, '[chat-run-socket] producer result %s was not applied', eventId)
+      return false
+    }
+  }
+
+  /** Lifecycle outcome of a stored process-completion receipt; null when the owner was reset or deleted. */
+  private applyProcessReceipt(sessionId: string, processId: string, receipt: Pick<SessionNotificationRecord, 'producer_key' | 'disposition' | 'payload'>): boolean {
+    if (receipt.disposition === 'owner_reset' || receipt.disposition === 'owner_missing') return false
+    const owner = { kind: 'hermes_process', id: processId }
+    if (receipt.disposition === 'owner_stopped' || receipt.disposition === 'cancelled') {
+      return this.producerFinished(sessionId, owner, receipt.producer_key, { ok: false, ref: receipt.producer_key, summary: 'Stopped by the user' })
+    }
+    const exitCode = receipt.payload.exit_code
+    return this.producerFinished(sessionId, owner, receipt.producer_key, exitCode === 0 && receipt.payload.status !== 'failed'
+      ? { ok: true, ref: receipt.producer_key, summary: 'Process exited with code 0' }
+      : { ok: false, ref: receipt.producer_key, summary: `Process ${receipt.payload.status || 'ended'} (exit code ${exitCode ?? 'unknown'})` })
+  }
+
+  /**
+   * Exact-producer reconciliation (startup and bridge replacement). A Hermes process is asked for by id in
+   * its owning session; delegations have no exact query and stay `unknown` until their own completion.
+   */
+  async reconcileTaskProducers(pending = listActiveProducers()) {
+    this.lastProducerReconcile = Date.now()
+    for (const item of pending) {
+      if (item.owner.kind !== 'hermes_process') continue
+      // A completion that was accepted but whose lifecycle write did not commit is applied from its receipt.
+      const receipt = findProcessCompletion(item.sessionId, item.owner.id)
+      if (receipt && this.applyProcessReceipt(item.sessionId, item.owner.id, receipt)) continue
+      const profile = getSession(item.sessionId)?.profile || 'default'
+      let observation: 'present' | 'absent' | 'unavailable' | 'exited'
+      try {
+        const found = await this.backgroundBridge.inspectProcess({ session_id: item.sessionId, profile, process_id: item.owner.id })
+        if (found?.present && found.exited) {
+          // Exited without a receipt (e.g. Hermes wait/log consumed the completion): apply the native exit code;
+          // without one the producer is honestly not running (unknown), never still running.
+          const code = found.exit_code
+          if (Number.isInteger(code)) {
+            this.producerFinished(item.sessionId, item.owner, `hermes-process-exit:${item.owner.id}`, code === 0
+              ? { ok: true, ref: `hermes-process-exit:${item.owner.id}`, summary: 'Process exited with code 0' }
+              : { ok: false, ref: `hermes-process-exit:${item.owner.id}`, summary: `Process exited (exit code ${code})` })
+            continue
+          }
+          observation = 'exited'
+        } else observation = found?.present ? 'present' : found?.present === false ? 'absent' : 'unavailable'
+      } catch {
+        observation = 'unavailable'
+      }
+      if (!observation) continue
+      try { taskProducers.reconcile({ ...item, observation }) } catch (err) {
+        logger.warn(err, '[chat-run-socket] reconciliation of %s failed', item.owner.id)
+      }
+    }
+  }
+
   private sessionTasksContext(contextId: string, profile: string) {
     const sessionId = this.taskPlanRuns.sessionForContext(contextId, profile)
     const session = getSession(sessionId)
@@ -588,7 +690,13 @@ export class ChatRunSocket {
   }
 
   listSessionTasks(contextId: string, profile: string) {
-    return getSessionTasks(this.sessionTasksContext(contextId, profile))
+    const sessionId = this.sessionTasksContext(contextId, profile)
+    const snapshot = getSessionTasks(sessionId)
+    // The live turn needs the current receipts (delivery/verification ids, revision) to verify or accept.
+    return { ...snapshot, tasks: snapshot.tasks.map(task => {
+      const lifecycle = getTaskLifecycle(sessionId, task.id)
+      return lifecycle ? { ...task, lifecycle: { ...projectLifecycle(lifecycle, lifecycle.revision), plan_id: lifecycle.plan_id } } : task
+    }) }
   }
 
   updateSessionTasks(contextId: string, profile: string, input: Record<string, unknown>) {
@@ -662,6 +770,8 @@ export class ChatRunSocket {
 
   private finishTaskPlanRun(sessionId: string, event: string, payload?: any, contextId?: string) {
     if (!['run.completed', 'run.failed', 'abort.completed'].includes(event)) return
+    // Without a context, a terminal event that names another turn must not close the current one.
+    if (!contextId && this.staleTerminalEvent(sessionId, event, payload)) return
     runMcpCredentials.revoke(sessionId, contextId)
     this.clarificationRuns.finishSession(sessionId, contextId)
     // A queue boundary can finish after its queued input was removed. Runtime
@@ -873,6 +983,7 @@ export class ChatRunSocket {
     })
   }
   init() {
+    this.ownedProducersActive = listActiveProducers().some(item => item.owner.kind.startsWith('hermes_'))
     this.closing = false
     this.nsp.use(this.authMiddleware.bind(this))
     this.nsp.on('connection', this.onConnection.bind(this))
@@ -2100,7 +2211,8 @@ export class ChatRunSocket {
       }
       try {
         await handleBridgeRun(
-          this.nsp, socket, { ...data, task_plan_context_id: planContext, studio_cron_issue: cronIssue, instructions: fullInstructions, onEvent }, profile,
+          this.nsp, socket, { ...data, task_plan_context_id: planContext, studio_cron_issue: cronIssue, instructions: fullInstructions, onEvent,
+            on_producer_spawn: (owner: TaskProducerOwner, ticket?: ProducerTicket) => data.session_id && this.observeProducerSpawn(data.session_id, ticket, owner) }, profile,
           this.sessionMap, this.bridge,
           skipUserMessage,
           loadSessionStateFromDb,
@@ -2352,6 +2464,11 @@ export class ChatRunSocket {
       return
     }
     state.backgroundDelegations = state.backgroundDelegations || {}
+    const delegationStatus = String(notification.status || 'completed')
+    this.producerFinished(sessionId, { kind: 'hermes_delegation', id: delegationId }, `delegation:${delegationId}`, {
+      ok: !['failed', 'error', 'cancelled', 'interrupted'].includes(delegationStatus), ref: `hermes-delegation:${delegationId}`,
+      summary: `Hermes delegation ${delegationStatus}`,
+    })
     persistHermesBackgroundResult(
       sessionId,
       state,
@@ -2434,14 +2551,18 @@ export class ChatRunSocket {
     const state = session ? await this.sessionStateForBackground(sessionId) : null
     // The producer's owner (profile + generation) must still be this session's current owner.
     const ownerDisposition = !state ? 'owner_missing' : this.machineOwnerVerdict(event)
+    const processId = String(notification.process_id || '')
     if (ownerDisposition) {
       acceptSessionNotification({ namespace, profile, producerKey, sessionId, sessionGeneration: ownerGeneration,
         kind: 'process_completion', disposition: ownerDisposition, payload, attention: false })
+      // Idempotent (event id = producer key): a replay retries a lifecycle write that did not commit.
+      this.applyProcessReceipt(sessionId, processId, { producer_key: producerKey, disposition: ownerDisposition, payload })
       await complete()
       return
     }
     const record = acceptSessionNotification({ namespace, profile, producerKey, sessionId, sessionGeneration: ownerGeneration,
       kind: 'process_completion', disposition: 'admitting', payload, attention: false })
+    this.applyProcessReceipt(sessionId, processId, { producer_key: producerKey, disposition: 'admitting', payload })
     if (!record) {
       // Already accepted once (replay): never a second turn.
       await complete()
@@ -2612,7 +2733,7 @@ export class ChatRunSocket {
 
   private needsBackgroundPoll(): boolean {
     if (this.closing) return false
-    if (this.backgroundRecoveryNeeded) return true
+    if (this.backgroundRecoveryNeeded || this.ownedProducersActive) return true
     if (Date.now() < this.backgroundActivityGraceUntil) return true
     for (const state of this.sessionMap.values()) {
       if (state.processNotifyPending) return true
@@ -2660,7 +2781,13 @@ export class ChatRunSocket {
         return
       }
       const brokerChanged = Boolean(this.backgroundBrokerId && result.broker_id && result.broker_id !== this.backgroundBrokerId)
+      const firstContact = Boolean(!this.backgroundBrokerId && result.broker_id)
       if (result.broker_id) this.backgroundBrokerId = result.broker_id
+      // First contact after startup or a replaced bridge worker: ask for each owned process exactly.
+      if (this.ownedProducersActive && (brokerChanged || firstContact || this.producersNeedReconcile || Date.now() - this.lastProducerReconcile > 30_000)) {
+        this.producersNeedReconcile = false
+        void this.reconcileTaskProducers()
+      }
       this.backgroundRecoveryNeeded = brokerChanged && !recovering
       this.backgroundPollRetryAt = 0
       if ((result.pending_count || 0) > 0) {
@@ -2689,6 +2816,14 @@ export class ChatRunSocket {
     } catch (err) {
       this.backgroundPollRetryAt = Date.now() + 5000
       logger.debug(err, '[chat-run-socket] background bridge poll unavailable')
+      // An unreachable bridge cannot confirm owned processes: show them as unknown until observed again.
+      if (this.ownedProducersActive) {
+        this.producersNeedReconcile = true
+        for (const item of listActiveProducers()) {
+          if (!item.owner.kind.startsWith('hermes_')) continue
+          try { taskProducers.reconcile({ ...item, observation: 'unavailable' }) } catch { /* concurrent change wins */ }
+        }
+      }
     } finally {
       this.backgroundPollInFlight = false
     }
@@ -3670,7 +3805,28 @@ export class ChatRunSocket {
     deleteSession(sid)
   }
 
+  /**
+   * A context-less terminal event that identifies a different run than the session's current one. Compared
+   * like for like (run markers, run/response ids); events without identity keep the legacy path.
+   */
+  private staleTerminalEvent(sessionId: string, event: string, payload: any): boolean {
+    if (!['run.completed', 'run.failed', 'abort.completed'].includes(event)) return false
+    const eventIds = [payload?.run_marker, payload?.run_id, payload?.response_id].filter((id): id is string => typeof id === 'string' && !!id)
+    if (!eventIds.length) return false
+    const state = this.sessionMap.get(sessionId)
+    const current = [state?.activeRunMarker, state?.responseRun?.runMarker, state?.responseRun?.responseId, state?.runId]
+      .filter((id): id is string => typeof id === 'string' && !!id)
+    if (current.length) return !eventIds.some(id => current.includes(id))
+    return !eventIds.some(id => this.taskPlanRuns.isCurrentTurn(sessionId, id))
+  }
+
   emitExternalEvent(sessionId: string, event: string, payload: any) {
+    // Nothing of a stale run's terminal event reaches the current run: card, credentials, working state,
+    // activity/App publication, room delivery and waiters.
+    if (this.staleTerminalEvent(sessionId, event, payload)) {
+      logger.info('[chat-run-socket] ignored %s of a replaced run for session %s', event, sessionId)
+      return
+    }
     this.finishTaskPlanRun(sessionId, event, payload)
     const tagged = { ...payload, session_id: sessionId }
     const profile = this.resolvePetEventProfile(sessionId, tagged)
@@ -4122,6 +4278,7 @@ export class ChatRunSocket {
     this.closing = true
     this.stopUsageUpdates()
     this.stopPersonUpdates()
+    this.stopTaskLifecycleUpdates()
     this.sessionStateSync.close()
     for (const sessionId of this.sessionMap.keys()) this.finishTaskPlanRun(sessionId, 'abort.completed')
     if (this.backgroundPollTimer) {

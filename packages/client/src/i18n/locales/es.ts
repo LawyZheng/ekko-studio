@@ -282,7 +282,8 @@ export default {
     "missingDependency": "Instala DSH y pnpm primero.",
   },
   announcements: {"later": "Más tarde", "details": "Ver detalles", "gotIt": "Entendido"},
-  taskPlan: {"title": "Plan de tareas", "progress": "{completed}/{total} completadas", "pending": "Pendiente", "in_progress": "En curso", "completed": "Completado", "running": "En ejecución", "ended": "Ejecución finalizada; quedan pasos pendientes", "interrupted": "Interrumpido; quedan pasos pendientes", "failed": "Ejecución fallida; quedan pasos pendientes"},
+  taskPlan: {"title": "Plan de tareas", "progress": "{completed}/{total} completadas", "pending": "Pendiente", "in_progress": "En curso", "completed": "Completado", "running": "En ejecución", "ended": "Ejecución finalizada; quedan pasos pendientes", "interrupted": "Interrumpido; quedan pasos pendientes", "failed": "Ejecución fallida; quedan pasos pendientes", "lifecycle": {"running": "En ejecución", "in_background": "Ejecución en segundo plano", "waiting_login": "Esperando que inicies sesión", "waiting_consent": "Esperando tu consentimiento", "waiting_decision": "Esperando tu decisión", "verifying": "Entregado; verificando", "failed": "El trabajador falló", "lost": "Se perdió el trabajador", "unknown": "Estado del trabajador desconocido", "open": "Abierta", "starting": "Iniciando", "done": "Hecho: verificado y aceptado"}},
+  sessionTask: {"waiting_user": "Esperándote", "running": "Tarea en segundo plano en curso", "verifying": "Verificando la entrega", "failed": "Tarea fallida", "lost": "Trabajador de la tarea perdido", "unknown": "Estado de la tarea desconocido", "open": "Tarea abierta", "done": "Tarea hecha"},
   agentAutoUpdate: { label: 'Actualizaciones automáticas' },
   ekkoConfig: {
     "settingsTitle": "Configuración",

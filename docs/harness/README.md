@@ -20,6 +20,7 @@ agent can discover without chat history.
 - `docs/harness/task-artifacts.md` defines external task/report storage and safe cleanup; `scripts/task-artifacts.mjs` checks known leftovers without deleting anything.
 - `docs/harness/pr-review.md` provides a PR self-review checklist.
 - `docs/harness/person-task-acceptance.md` documents opt-in background-task acceptance, durable completion gates, supported surfaces and validation.
+- `docs/task-lifecycle.md` documents linked session goals, the original task card, owned producers, verified acceptance and the avatar projection.
 - `docs/harness/person-task-redirection.md` documents direction corrections, queue/callback invalidation, confirmed-stop barriers and focused verification.
 - `docs/harness/startup-tasks.md` describes one-time startup operations and their persistent execution records.
 - `docs/harness/server-module-boundaries.md` defines backend ownership and the migration target.

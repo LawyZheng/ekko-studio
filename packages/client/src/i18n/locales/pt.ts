@@ -282,7 +282,8 @@ export default {
     "missingDependency": "Instale DSH e pnpm primeiro.",
   },
   announcements: {"later": "Mais tarde", "details": "Ver detalhes", "gotIt": "Entendido"},
-  taskPlan: {"title": "Plano de tarefas", "progress": "{completed}/{total} concluídas", "pending": "Pendente", "in_progress": "Em andamento", "completed": "Concluído", "running": "Em execução", "ended": "Execução encerrada; há etapas pendentes", "interrupted": "Interrompido; há etapas pendentes", "failed": "Falha na execução; há etapas pendentes"},
+  taskPlan: {"title": "Plano de tarefas", "progress": "{completed}/{total} concluídas", "pending": "Pendente", "in_progress": "Em andamento", "completed": "Concluído", "running": "Em execução", "ended": "Execução encerrada; há etapas pendentes", "interrupted": "Interrompido; há etapas pendentes", "failed": "Falha na execução; há etapas pendentes", "lifecycle": {"running": "Em execução", "in_background": "Execução em segundo plano", "waiting_login": "Aguardando seu login", "waiting_consent": "Aguardando seu consentimento", "waiting_decision": "Aguardando sua decisão", "verifying": "Entregue; verificando", "failed": "O executor falhou", "lost": "Executor perdido", "unknown": "Estado do executor desconhecido", "open": "Aberta", "starting": "Iniciando", "done": "Concluída — verificada e aceita"}},
+  sessionTask: {"waiting_user": "Aguardando você", "running": "Tarefa em segundo plano em execução", "verifying": "Entrega em verificação", "failed": "Tarefa falhou", "lost": "Executor da tarefa perdido", "unknown": "Estado da tarefa desconhecido", "open": "Tarefa aberta", "done": "Tarefa concluída"},
   agentAutoUpdate: { label: 'Atualizações automáticas' },
   ekkoConfig: {
     "settingsTitle": "Configurações",

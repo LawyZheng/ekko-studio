@@ -302,6 +302,9 @@ class BridgeServer:
             session_ids = req.get("session_ids")
             return self.pool.poll_background(session_ids if isinstance(session_ids, list) else None)
 
+        if action == "process_inspect":
+            return self.pool.inspect_process(str(req.get("session_id") or ""), str(req.get("process_id") or ""))
+
         if action in {"process_notification_admit", "process_notification_complete", "process_notification_release"}:
             producer_key = str(req.get("producer_key") or "").strip()
             claim_id = str(req.get("claim_id") or "").strip()

@@ -10,7 +10,23 @@ export interface TaskPlanSnapshot {
   plan: Array<{ id: string; step: string; status: 'pending' | 'in_progress' | 'completed' }>
   created_at: number
   updated_at: number
+  task_id?: string
+  /** Server projection of the linked goal's lifecycle; absent on run-only cards. */
+  lifecycle?: {
+    phase: TaskLifecyclePhase
+    attempt: number
+    revision: number
+    updated_at: number
+    owner_kind?: string
+    delivery_id?: string
+    verification_id?: string
+    waiting_kind?: 'login' | 'consent' | 'decision'
+    reason?: string
+  }
 }
+
+export type TaskLifecyclePhase = 'open' | 'starting' | 'running' | 'waiting_user' | 'verifying' | 'failed' | 'lost' | 'unknown' | 'done'
+const PHASES: TaskLifecyclePhase[] = ['open', 'starting', 'running', 'waiting_user', 'verifying', 'failed', 'lost', 'unknown', 'done']
 
 export function parseTaskPlan(value: unknown): TaskPlanSnapshot | null {
   if (!value || typeof value !== 'object') return null
@@ -19,6 +35,7 @@ export function parseTaskPlan(value: unknown): TaskPlanSnapshot | null {
   if (!Number.isSafeInteger(p.revision) || p.revision < 1 || !Number.isFinite(p.created_at) || !Number.isFinite(p.updated_at)) return null
   if (!['running', 'ended', 'interrupted', 'failed'].includes(p.execution_state)) return null
   if (p.explanation !== undefined && typeof p.explanation !== 'string') return null
+  if (p.lifecycle !== undefined && (!p.lifecycle || !PHASES.includes(p.lifecycle.phase) || !Number.isSafeInteger(p.lifecycle.revision))) return null
   if (!Array.isArray(p.plan) || p.plan.length < 1 || p.plan.length > 30) return null
   const ids = new Set<string>()
   for (const step of p.plan) {

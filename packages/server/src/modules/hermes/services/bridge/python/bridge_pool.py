@@ -1293,6 +1293,19 @@ class AgentPool:
             return {"admitted": False, "reason": "consumed"}
         return {"admitted": True}
 
+    def inspect_process(self, session_id: str, process_id: str) -> dict[str, Any]:
+        """Exact ownership query for task-lifecycle reconciliation: is this process registered to this session?"""
+        if not session_id or not process_id:
+            raise ValueError("session_id and process_id are required")
+        from tools.process_registry import process_registry
+
+        proc = process_registry.get(process_id)
+        if proc is None or str(getattr(proc, "session_key", "") or "") != session_id:
+            return {"present": False}
+        exit_code = getattr(proc, "exit_code", None)
+        return {"present": True, "exited": bool(getattr(proc, "exited", False)),
+                "exit_code": exit_code if isinstance(exit_code, int) else None}
+
     def complete_process_notification(self, producer_key: str, claim_id: str) -> dict[str, Any]:
         with self._lock:
             event = self._process_notification_claims.pop((producer_key, claim_id), None)

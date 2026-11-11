@@ -1,4 +1,29 @@
+import type { TaskLifecyclePhase } from './task-plan'
+
 export type SessionTaskStatus = 'open' | 'completed' | 'closed'
+
+export interface TaskProducerOwner { kind: string; id: string; incarnation?: string }
+interface Receipt { id: string; by: string; at: number }
+
+/** Stored in session_tasks.lifecycle_json; the goal row stays the only outcome authority. */
+export interface SessionTaskLifecycle {
+  v: 1
+  /** Original card, linked once; its run, creation time and anchor never move. */
+  plan_id: string
+  phase: TaskLifecyclePhase
+  attempt: number
+  /** Session incarnation that linked the goal; a reset session fences every later event. */
+  session_generation: string
+  owner: TaskProducerOwner | null
+  delivery: (Receipt & { ref: string; digest?: string; summary: string }) | null
+  verification: (Receipt & { evidence: string }) | null
+  acceptance: { evidence: string; by: string; at: number } | null
+  waiting: { kind: 'login' | 'consent' | 'decision'; reason: string; resume: TaskLifecyclePhase } | null
+  reason: string
+  /** Bounded event-id → content digest map for idempotent redelivery and conflict detection. */
+  events: Record<string, string>
+  updated_at: number
+}
 
 /** User goals persist across turns; they are independent of run task plans. */
 export interface SessionTask {
