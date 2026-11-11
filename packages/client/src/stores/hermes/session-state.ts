@@ -1,3 +1,4 @@
+import { sessionTaskIndicator } from '@/utils/task-lifecycle'
 import { ref, reactive, onScopeDispose } from 'vue'
 import { defineStore } from 'pinia'
 import type { RouteLocation, Router } from 'vue-router'
@@ -97,7 +98,9 @@ export const useSessionStateStore = defineStore('sessionState', () => {
       const state = sessions.value.get(id)
       return state ? !state.working && state.unread : initialUnread
     },
-    backgroundCount: (id: string) => sessions.value.get(id)?.backgroundPending ?? 0 }
+    backgroundCount: (id: string) => sessions.value.get(id)?.backgroundPending ?? 0,
+    isForeground: (id: string, initialActivity = false) => sessions.value.get(id)?.foreground ?? initialActivity,
+    taskIndicator: (id: string) => sessionTaskIndicator(sessions.value.get(id)?.task) }
 })
 
 function routedSessionId(route: Pick<RouteLocation, 'name' | 'params' | 'query'>): string | null {
